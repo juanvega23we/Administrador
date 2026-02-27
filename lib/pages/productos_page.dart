@@ -19,11 +19,19 @@ class _ProductosPageState extends State<ProductosPage>
   List<String> _categoriasActuales = [];
   bool _actualizandoController = false;
 
+  // ── BÚSQUEDA ──────────────────────────────────────────────────────────────
+  bool _mostrandoBusqueda = false;
+  String _textoBusqueda = '';
+  final TextEditingController _busquedaCtrl = TextEditingController();
+  final FocusNode _busquedaFocus = FocusNode();
+
   static const String _tabTodo = 'Todo';
 
   @override
   void dispose() {
     _tabController?.dispose();
+    _busquedaCtrl.dispose();
+    _busquedaFocus.dispose();
     super.dispose();
   }
 
@@ -68,15 +76,11 @@ class _ProductosPageState extends State<ProductosPage>
   }
 
   Widget _buildImagen(String? urlImagen, {double size = 60}) {
-    // Debug: imprimir la URL para verificar
-    print('🖼️ URL de imagen: $urlImagen');
-    
     if (urlImagen == null ||
         urlImagen.isEmpty ||
         urlImagen.startsWith('assets/')) {
       return Icon(Icons.image, size: size * 0.5, color: Colors.grey);
     }
-
     if (urlImagen.startsWith('http')) {
       return Image.network(
         urlImagen,
@@ -96,17 +100,13 @@ class _ProductosPageState extends State<ProductosPage>
             ),
           );
         },
-        errorBuilder: (context, error, stackTrace) {
-          print('❌ Error cargando imagen: $error');
-          return Icon(Icons.broken_image, size: size * 0.5, color: Colors.grey);
-        },
+        errorBuilder: (context, error, stackTrace) =>
+            Icon(Icons.broken_image, size: size * 0.5, color: Colors.grey),
       );
     }
-
     return Icon(Icons.image, size: size * 0.5, color: Colors.grey);
   }
 
-  // ── COLOR DEL STOCK ─────────────────────────────────────────────────────────
   Color _colorStock(int stock) {
     if (stock == 0) return Colors.red;
     if (stock <= 10) return Colors.orange;
@@ -117,6 +117,20 @@ class _ProductosPageState extends State<ProductosPage>
     if (stock == 0) return 'Sin stock';
     if (stock <= 10) return 'Stock bajo: $stock';
     return 'Stock: $stock';
+  }
+
+  List<Map<String, dynamic>> _filtrarProductos(
+      List<Map<String, dynamic>> productos) {
+    if (_textoBusqueda.isEmpty) return productos;
+    final query = _textoBusqueda.toLowerCase();
+    return productos.where((p) {
+      final nombre = (p['nombre'] ?? '').toString().toLowerCase();
+      final categoria = (p['categoria'] ?? '').toString().toLowerCase();
+      final subtexto = (p['subtexto'] ?? '').toString().toLowerCase();
+      return nombre.contains(query) ||
+          categoria.contains(query) ||
+          subtexto.contains(query);
+    }).toList();
   }
 
   @override
@@ -146,8 +160,7 @@ class _ProductosPageState extends State<ProductosPage>
 
         if (!snapshot.hasData) {
           return const Scaffold(
-            body:
-                Center(child: CircularProgressIndicator(color: Colors.teal)),
+            body: Center(child: CircularProgressIndicator(color: Colors.teal)),
           );
         }
 
@@ -169,63 +182,154 @@ class _ProductosPageState extends State<ProductosPage>
         if (_tabController == null ||
             _tabController!.length != tabsParaMostrar.length) {
           return const Scaffold(
-            body:
-                Center(child: CircularProgressIndicator(color: Colors.teal)),
+            body: Center(child: CircularProgressIndicator(color: Colors.teal)),
           );
         }
 
         return Scaffold(
           backgroundColor: Colors.grey[50],
           appBar: AppBar(
-            title: const Text('Gestionar Productos',
-                style: TextStyle(fontWeight: FontWeight.bold)),
             backgroundColor: Colors.teal,
             foregroundColor: Colors.white,
             elevation: 0,
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.add_circle_outline),
-                tooltip: 'Nueva Categoría',
-                onPressed: () =>
-                    _mostrarDialogoCrearCategoria(context, categorias),
-              ),
-            ],
-            bottom: TabBar(
-              controller: _tabController,
-              indicatorColor: Colors.white,
-              indicatorWeight: 3,
-              labelColor: Colors.white,
-              unselectedLabelColor: Colors.white70,
-              isScrollable: true,
-              tabs: tabsParaMostrar.map((tab) {
-                if (tab == _tabTodo) {
-                  return const Tab(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.grid_view, size: 16),
-                        SizedBox(width: 6),
-                        Text('Todo'),
-                      ],
+            // ── TÍTULO o CAMPO DE BÚSQUEDA según el estado ────────────────
+            title: _mostrandoBusqueda
+                ? ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: Container(
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: Colors.teal.shade600, width: 2),
+                      ),
+                      child: Row(
+                        children: [
+                          GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                _mostrandoBusqueda = false;
+                                _textoBusqueda = '';
+                                _busquedaCtrl.clear();
+                              });
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              child: Icon(Icons.close, color: Colors.teal.shade600, size: 20),
+                            ),
+                          ),
+                          Expanded(
+                            child: TextField(
+                              controller: _busquedaCtrl,
+                              focusNode: _busquedaFocus,
+                              autofocus: true,
+                              style: const TextStyle(color: Colors.black87, fontSize: 15),
+                              cursorColor: Colors.teal,
+                              decoration: InputDecoration(
+                                hintText: 'Buscar producto...',
+                                hintStyle: TextStyle(color: Colors.grey[400]),
+                                border: InputBorder.none,
+                                isDense: true,
+                                contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                              onChanged: (v) => setState(() => _textoBusqueda = v),
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                        ],
+                      ),
                     ),
-                  );
-                }
-                return Tab(
+                  )
+                : const Text(
+                    'Gestionar Productos',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+            // ── ACCIONES: lupa cuando no se busca ─────────────────────────
+            actions: [
+              if (!_mostrandoBusqueda)
+                IconButton(
+                  icon: const Icon(Icons.search),
+                  tooltip: 'Buscar',
+                  onPressed: () {
+                    setState(() => _mostrandoBusqueda = true);
+                    Future.delayed(const Duration(milliseconds: 100), () {
+                      _busquedaFocus.requestFocus();
+                    });
+                  },
+                ),
+            ],
+            // ── TABS + BOTÓN + ─────────────────────────────────────────────
+            bottom: PreferredSize(
+              preferredSize: const Size.fromHeight(48),
+              child: SizedBox(
+                height: 48,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Text(tab),
-                      const SizedBox(width: 6),
+                      TabBar(
+                        controller: _tabController,
+                        indicatorColor: Colors.white,
+                        indicatorWeight: 3,
+                        labelColor: Colors.white,
+                        unselectedLabelColor: Colors.white70,
+                        isScrollable: true,
+                        tabAlignment: TabAlignment.start,
+                        tabs: tabsParaMostrar.map((tab) {
+                          if (tab == _tabTodo) {
+                            return const Tab(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.grid_view, size: 16),
+                                  SizedBox(width: 6),
+                                  Text('Todo'),
+                                ],
+                              ),
+                            );
+                          }
+                          return Tab(
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(tab),
+                                const SizedBox(width: 6),
+                                GestureDetector(
+                                  onTap: () =>
+                                      _confirmarEliminarCategoria(context, tab),
+                                  child: const Icon(Icons.close,
+                                      size: 14, color: Colors.white70),
+                                ),
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      // ── BOTÓN + PEGADO AL ÚLTIMO TAB ──────────────────────
                       GestureDetector(
                         onTap: () =>
-                            _confirmarEliminarCategoria(context, tab),
-                        child: const Icon(Icons.close,
-                            size: 14, color: Colors.white70),
+                            _mostrarDialogoCrearCategoria(context, categorias),
+                        child: Container(
+                          width: 44,
+                          height: 48,
+                          alignment: Alignment.center,
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.white24,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: const Icon(Icons.add,
+                                color: Colors.white, size: 20),
+                          ),
+                        ),
                       ),
                     ],
                   ),
-                );
-              }).toList(),
+                ),
+              ),
             ),
           ),
           body: TabBarView(
@@ -281,7 +385,7 @@ class _ProductosPageState extends State<ProductosPage>
               child: CircularProgressIndicator(color: Colors.teal));
         }
 
-        final productos = snapshot.data!;
+        final productos = _filtrarProductos(snapshot.data!);
 
         if (productos.isEmpty) {
           return Center(
@@ -291,9 +395,12 @@ class _ProductosPageState extends State<ProductosPage>
                 Icon(Icons.inventory_2_outlined,
                     size: 80, color: Colors.grey[400]),
                 const SizedBox(height: 16),
-                Text('No hay productos todavía',
-                    style:
-                        TextStyle(fontSize: 18, color: Colors.grey[600])),
+                Text(
+                  _textoBusqueda.isNotEmpty
+                      ? 'Sin resultados para "$_textoBusqueda"'
+                      : 'No hay productos todavía',
+                  style: TextStyle(fontSize: 18, color: Colors.grey[600]),
+                ),
               ],
             ),
           );
@@ -302,8 +409,9 @@ class _ProductosPageState extends State<ProductosPage>
         return ListView.builder(
           padding: const EdgeInsets.all(16),
           itemCount: productos.length,
-          itemBuilder: (_, i) =>
-              _buildProductoCard(productos[i], todasCategorias, enTabTodo: true),
+          itemBuilder: (_, i) => _buildProductoCard(
+              productos[i], todasCategorias,
+              enTabTodo: true),
         );
       },
     );
@@ -333,7 +441,7 @@ class _ProductosPageState extends State<ProductosPage>
               child: CircularProgressIndicator(color: Colors.teal));
         }
 
-        final productos = snapshot.data!;
+        final productos = _filtrarProductos(snapshot.data!);
 
         if (productos.isEmpty) {
           return Center(
@@ -343,17 +451,21 @@ class _ProductosPageState extends State<ProductosPage>
                 Icon(Icons.inventory_2_outlined,
                     size: 80, color: Colors.grey[400]),
                 const SizedBox(height: 16),
-                Text('No hay productos en $categoria',
-                    style:
-                        TextStyle(fontSize: 18, color: Colors.grey[600])),
-                const SizedBox(height: 8),
-                TextButton.icon(
-                  onPressed: () => _mostrarDialogoCrear(
-                      context, todasCategorias,
-                      categoriaInicial: categoria),
-                  icon: const Icon(Icons.add_circle_outline),
-                  label: const Text('Agregar Primero'),
+                Text(
+                  _textoBusqueda.isNotEmpty
+                      ? 'Sin resultados para "$_textoBusqueda"'
+                      : 'No hay productos en $categoria',
+                  style: TextStyle(fontSize: 18, color: Colors.grey[600]),
                 ),
+                const SizedBox(height: 8),
+                if (_textoBusqueda.isEmpty)
+                  TextButton.icon(
+                    onPressed: () => _mostrarDialogoCrear(
+                        context, todasCategorias,
+                        categoriaInicial: categoria),
+                    icon: const Icon(Icons.add_circle_outline),
+                    label: const Text('Agregar Primero'),
+                  ),
               ],
             ),
           );
@@ -381,8 +493,7 @@ class _ProductosPageState extends State<ProductosPage>
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       elevation: 2,
-      shape:
-          RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: ListTile(
         contentPadding: const EdgeInsets.all(12),
         leading: Container(
@@ -399,8 +510,8 @@ class _ProductosPageState extends State<ProductosPage>
           ),
         ),
         title: Text(producto['nombre'] ?? 'Sin nombre',
-            style: const TextStyle(
-                fontWeight: FontWeight.bold, fontSize: 16)),
+            style:
+                const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -425,8 +536,8 @@ class _ProductosPageState extends State<ProductosPage>
                 ),
                 const SizedBox(width: 12),
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   decoration: BoxDecoration(
                     color: activo ? Colors.green[50] : Colors.red[50],
                     borderRadius: BorderRadius.circular(12),
@@ -437,19 +548,17 @@ class _ProductosPageState extends State<ProductosPage>
                     activo ? 'Activo' : 'Inactivo',
                     style: TextStyle(
                       fontSize: 11,
-                      color:
-                          activo ? Colors.green[700] : Colors.red[700],
+                      color: activo ? Colors.green[700] : Colors.red[700],
                       fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
-                // ── BADGE DE STOCK ──────────────────────────
                 GestureDetector(
                   onTap: () => _mostrarDialogoStock(context, producto),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 2),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
                       color: _colorStock(stock).withOpacity(0.1),
                       borderRadius: BorderRadius.circular(12),
@@ -488,26 +597,13 @@ class _ProductosPageState extends State<ProductosPage>
               ]),
               onTap: () => Future.delayed(
                   Duration.zero,
-                  () => _mostrarDialogoEditar(
-                      context, producto, categorias)),
-            ),
-            PopupMenuItem(
-              child: const Row(children: [
-                Icon(Icons.inventory_2, size: 20, color: Colors.blue),
-                SizedBox(width: 12),
-                Text('Actualizar Stock',
-                    style: TextStyle(color: Colors.blue)),
-              ]),
-              onTap: () => Future.delayed(
-                  Duration.zero,
-                  () => _mostrarDialogoStock(context, producto)),
+                  () =>
+                      _mostrarDialogoEditar(context, producto, categorias)),
             ),
             PopupMenuItem(
               child: Row(children: [
                 Icon(
-                    activo
-                        ? Icons.visibility_off
-                        : Icons.visibility,
+                    activo ? Icons.visibility_off : Icons.visibility,
                     size: 20),
                 const SizedBox(width: 12),
                 Text(activo ? 'Desactivar' : 'Activar'),
@@ -517,16 +613,14 @@ class _ProductosPageState extends State<ProductosPage>
             if (enTabTodo)
               PopupMenuItem(
                 child: const Row(children: [
-                  Icon(Icons.delete_forever,
-                      size: 20, color: Colors.red),
+                  Icon(Icons.delete_forever, size: 20, color: Colors.red),
                   SizedBox(width: 12),
-                  Text('Eliminar',
-                      style: TextStyle(color: Colors.red)),
+                  Text('Eliminar', style: TextStyle(color: Colors.red)),
                 ]),
                 onTap: () => Future.delayed(
                     Duration.zero,
-                    () => _confirmarEliminarPermanente(
-                        context, producto)),
+                    () =>
+                        _confirmarEliminarPermanente(context, producto)),
               ),
           ],
         ),
@@ -534,7 +628,7 @@ class _ProductosPageState extends State<ProductosPage>
     );
   }
 
-  // ── DIÁLOGO ACTUALIZAR STOCK ────────────────────────────────────────────────
+  // ── DIÁLOGO STOCK ───────────────────────────────────────────────────────────
   void _mostrarDialogoStock(
       BuildContext context, Map<String, dynamic> producto) {
     final stock = (producto['stock'] ?? 0) as int;
@@ -618,7 +712,7 @@ class _ProductosPageState extends State<ProductosPage>
     );
   }
 
-  // ── DIÁLOGOS ─────────────────────────────────────────────────────────────────
+  // ── DIÁLOGOS ──────────────────────────────────────────────────────────────
 
   void _mostrarDialogoCrearCategoria(
       BuildContext context, List<String> categorias) {
@@ -682,8 +776,7 @@ class _ProductosPageState extends State<ProductosPage>
     );
   }
 
-  void _confirmarEliminarCategoria(
-      BuildContext context, String categoria) {
+  void _confirmarEliminarCategoria(BuildContext context, String categoria) {
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -770,10 +863,9 @@ class _ProductosPageState extends State<ProductosPage>
     final precioCtrl = TextEditingController();
     final subtextoCtrl = TextEditingController();
     final stockCtrl = TextEditingController(text: '0');
-    String categoriaSeleccionada =
-        categoriaInicial ?? categorias.first;
+    String categoriaSeleccionada = categoriaInicial ?? categorias.first;
     bool guardando = false;
-    Uint8List? imagenBytes; // ✅ imagen local seleccionada
+    Uint8List? imagenBytes;
 
     showDialog(
       context: context,
@@ -787,7 +879,6 @@ class _ProductosPageState extends State<ProductosPage>
                 StatefulBuilder(
                   builder: (_, setPreview) => Column(
                     children: [
-                      // ✅ Preview imagen local
                       GestureDetector(
                         onTap: () async {
                           final picker = ImagePicker();
@@ -811,9 +902,6 @@ class _ProductosPageState extends State<ProductosPage>
                                   ? Colors.teal
                                   : Colors.grey[300]!,
                               width: 2,
-                              style: imagenBytes != null
-                                  ? BorderStyle.solid
-                                  : BorderStyle.solid,
                             ),
                           ),
                           clipBehavior: Clip.antiAlias,
@@ -835,16 +923,14 @@ class _ProductosPageState extends State<ProductosPage>
                                               color: Colors.red,
                                               shape: BoxShape.circle),
                                           child: const Icon(Icons.close,
-                                              color: Colors.white,
-                                              size: 16),
+                                              color: Colors.white, size: 16),
                                         ),
                                       ),
                                     ),
                                   ],
                                 )
                               : Column(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.center,
+                                  mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
                                     Icon(Icons.add_photo_alternate_outlined,
                                         size: 48, color: Colors.grey[400]),
@@ -891,7 +977,6 @@ class _ProductosPageState extends State<ProductosPage>
                   ),
                 ),
                 const SizedBox(height: 12),
-                // ── CAMPO STOCK ──────────────────────────────
                 TextField(
                   controller: stockCtrl,
                   keyboardType: TextInputType.number,
@@ -940,8 +1025,7 @@ class _ProductosPageState extends State<ProductosPage>
           ),
           actions: [
             TextButton(
-              onPressed:
-                  guardando ? null : () => Navigator.pop(ctx),
+              onPressed: guardando ? null : () => Navigator.pop(ctx),
               child: const Text('Cancelar'),
             ),
             ElevatedButton(
@@ -952,15 +1036,13 @@ class _ProductosPageState extends State<ProductosPage>
                           precioCtrl.text.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
-                            content:
-                                Text('Completa nombre y precio'),
+                            content: Text('Completa nombre y precio'),
                             backgroundColor: Colors.red,
                           ),
                         );
                         return;
                       }
                       setDlgState(() => guardando = true);
-                      // ✅ Subir imagen a Firebase Storage si se seleccionó una
                       String? urlFinal;
                       if (imagenBytes != null) {
                         final nombreArchivo =
@@ -983,8 +1065,7 @@ class _ProductosPageState extends State<ProductosPage>
                       final resultado =
                           await _productoService.crearProducto(
                         nombre: nombreCtrl.text.trim(),
-                        precio:
-                            double.tryParse(precioCtrl.text) ?? 0,
+                        precio: double.tryParse(precioCtrl.text) ?? 0,
                         categoria: categoriaSeleccionada,
                         subtexto: subtextoCtrl.text.trim(),
                         idAdmin: 'admin',
@@ -1021,8 +1102,7 @@ class _ProductosPageState extends State<ProductosPage>
     Map<String, dynamic> producto,
     List<String> categorias,
   ) {
-    final nombreCtrl =
-        TextEditingController(text: producto['nombre']);
+    final nombreCtrl = TextEditingController(text: producto['nombre']);
     final precioCtrl = TextEditingController(
         text: producto['precio']?.toString() ?? '0');
     final subtextoCtrl =
@@ -1031,10 +1111,8 @@ class _ProductosPageState extends State<ProductosPage>
         text: (producto['stock'] ?? 0).toString());
 
     final imgExistente = producto['imagen'] as String? ?? '';
-    // ✅ URL existente (para mostrar la imagen actual)
     String imagenUrlExistente =
         imgExistente.startsWith('http') ? imgExistente : '';
-    // ✅ Bytes de nueva imagen local (si el admin cambia la imagen)
     Uint8List? imagenBytesNueva;
 
     final catProducto = producto['categoria'] as String? ?? '';
@@ -1056,7 +1134,6 @@ class _ProductosPageState extends State<ProductosPage>
                 StatefulBuilder(
                   builder: (_, setPreview) => Column(
                     children: [
-                      // ✅ Preview: nueva imagen local o la existente
                       GestureDetector(
                         onTap: () async {
                           final picker = ImagePicker();
@@ -1084,7 +1161,6 @@ class _ProductosPageState extends State<ProductosPage>
                           ),
                           clipBehavior: Clip.antiAlias,
                           child: imagenBytesNueva != null
-                              // Nueva imagen seleccionada
                               ? Stack(
                                   fit: StackFit.expand,
                                   children: [
@@ -1102,15 +1178,13 @@ class _ProductosPageState extends State<ProductosPage>
                                               color: Colors.red,
                                               shape: BoxShape.circle),
                                           child: const Icon(Icons.close,
-                                              color: Colors.white,
-                                              size: 16),
+                                              color: Colors.white, size: 16),
                                         ),
                                       ),
                                     ),
                                   ],
                                 )
                               : imagenUrlExistente.isNotEmpty
-                                  // Imagen actual de Firestore
                                   ? Stack(
                                       fit: StackFit.expand,
                                       children: [
@@ -1121,7 +1195,6 @@ class _ProductosPageState extends State<ProductosPage>
                                               const Icon(Icons.broken_image,
                                                   size: 40),
                                         ),
-                                        // Indicador de que se puede cambiar
                                         Positioned(
                                           bottom: 0,
                                           left: 0,
@@ -1142,12 +1215,13 @@ class _ProductosPageState extends State<ProductosPage>
                                         ),
                                       ],
                                     )
-                                  // Sin imagen
                                   : Column(
                                       mainAxisAlignment:
                                           MainAxisAlignment.center,
                                       children: [
-                                        Icon(Icons.add_photo_alternate_outlined,
+                                        Icon(
+                                            Icons
+                                                .add_photo_alternate_outlined,
                                             size: 48,
                                             color: Colors.grey[400]),
                                         const SizedBox(height: 8),
@@ -1194,7 +1268,6 @@ class _ProductosPageState extends State<ProductosPage>
                   ),
                 ),
                 const SizedBox(height: 12),
-                // ── CAMPO STOCK ──────────────────────────────
                 TextField(
                   controller: stockCtrl,
                   keyboardType: TextInputType.number,
@@ -1247,8 +1320,7 @@ class _ProductosPageState extends State<ProductosPage>
           ),
           actions: [
             TextButton(
-              onPressed:
-                  guardando ? null : () => Navigator.pop(ctx),
+              onPressed: guardando ? null : () => Navigator.pop(ctx),
               child: const Text('Cancelar'),
             ),
             ElevatedButton(
@@ -1258,8 +1330,7 @@ class _ProductosPageState extends State<ProductosPage>
                       if (categoriaSeleccionada.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
-                            content:
-                                Text('Selecciona una categoría'),
+                            content: Text('Selecciona una categoría'),
                             backgroundColor: Colors.orange,
                           ),
                         );
@@ -1270,17 +1341,16 @@ class _ProductosPageState extends State<ProductosPage>
                           await _productoService.actualizarProducto(
                         idProducto: producto['id'],
                         nombre: nombreCtrl.text.trim(),
-                        precio:
-                            double.tryParse(precioCtrl.text) ?? 0,
+                        precio: double.tryParse(precioCtrl.text) ?? 0,
                         subtexto: subtextoCtrl.text.trim(),
                         categoria: categoriaSeleccionada,
-                        // ✅ Si hay nueva imagen local, subirla; si no, conservar la existente
                         imagenUrl: imagenBytesNueva != null
                             ? await _productoService.subirImagen(
-                                bytes: imagenBytesNueva!,
-                                nombreArchivo:
-                                    '${producto['id']}_${DateTime.now().millisecondsSinceEpoch}.jpg',
-                              ) ?? imagenUrlExistente
+                                    bytes: imagenBytesNueva!,
+                                    nombreArchivo:
+                                        '${producto['id']}_${DateTime.now().millisecondsSinceEpoch}.jpg',
+                                  ) ??
+                                imagenUrlExistente
                             : imagenUrlExistente,
                         stock: int.tryParse(stockCtrl.text) ?? 0,
                       );
@@ -1308,8 +1378,7 @@ class _ProductosPageState extends State<ProductosPage>
     );
   }
 
-  Future<void> _cambiarEstado(
-      String idProducto, bool nuevoEstado) async {
+  Future<void> _cambiarEstado(String idProducto, bool nuevoEstado) async {
     final resultado = nuevoEstado
         ? await _productoService.activarProducto(idProducto)
         : await _productoService.desactivarProducto(idProducto);
@@ -1317,8 +1386,7 @@ class _ProductosPageState extends State<ProductosPage>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(resultado['mensaje']),
-        backgroundColor:
-            resultado['exito'] ? Colors.green : Colors.red,
+        backgroundColor: resultado['exito'] ? Colors.green : Colors.red,
       ),
     );
   }

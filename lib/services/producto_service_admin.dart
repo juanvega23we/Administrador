@@ -7,8 +7,6 @@ class ProductoServiceAdmin {
   final FirebaseStorage _storage = FirebaseStorage.instance;
 
   // ── SUBIR IMAGEN A FIREBASE STORAGE ─────────────────────────────────────────
-  /// Sube los bytes de una imagen y retorna la URL pública de descarga.
-  /// [idProducto] se usa como nombre de archivo para sobreescribir si ya existe.
   Future<String?> subirImagen({
     required Uint8List bytes,
     required String nombreArchivo,
@@ -49,28 +47,21 @@ class ProductoServiceAdmin {
     String? descripcion,
   }) async {
     try {
+      // Verificar si ya existe una categoría activa con ese nombre
       final existing = await _firestore
           .collection('tipo_producto')
           .where('nombre', isEqualTo: nombre)
+          .where('activo', isEqualTo: true)
           .get();
 
       if (existing.docs.isNotEmpty) {
-        final doc = existing.docs.first;
-        final estaActivo = doc.data()['activo'] == true;
-        if (estaActivo) {
-          return {
-            'exito': false,
-            'mensaje': 'Ya existe una categoría con ese nombre',
-          };
-        } else {
-          await doc.reference.update({
-            'activo': true,
-            'fechaReactivacion': FieldValue.serverTimestamp(),
-          });
-          return {'exito': true, 'mensaje': 'Categoría creada exitosamente'};
-        }
+        return {
+          'exito': false,
+          'mensaje': 'Ya existe una categoría con ese nombre',
+        };
       }
 
+      // Crear nueva categoría desde cero (siempre)
       await _firestore.collection('tipo_producto').add({
         'nombre': nombre,
         'descripcion': descripcion ?? '',
@@ -95,10 +86,8 @@ class ProductoServiceAdmin {
         return {'exito': false, 'mensaje': 'Categoría no encontrada'};
       }
 
-      await snapshot.docs.first.reference.update({
-        'activo': false,
-        'fechaEliminacion': FieldValue.serverTimestamp(),
-      });
+      // ✅ BORRAR el documento completamente de Firestore
+      await snapshot.docs.first.reference.delete();
 
       return {'exito': true, 'mensaje': 'Categoría eliminada exitosamente'};
     } catch (e) {
@@ -153,9 +142,8 @@ class ProductoServiceAdmin {
     int stock = 0,
   }) async {
     try {
-      // Debug: verificar la URL antes de guardar
       print('💾 Guardando producto con imagen URL: $imagenUrl');
-      
+
       final docRef = await _firestore.collection('productos').add({
         'nombre': nombre,
         'precio': precio,
