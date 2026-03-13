@@ -42,12 +42,37 @@ class ProductoServiceAdmin {
     });
   }
 
+  // ── Obtiene mapa prefijo → categoría desde Firestore ──────────────────────
+  // Ejemplo resultado: { '22': 'Chocolate', '33': 'Galletas' }
+  Future<Map<String, String>> obtenerMapaPrefijos() async {
+    try {
+      final snapshot = await _firestore
+          .collection('tipo_producto')
+          .where('activo', isEqualTo: true)
+          .get();
+
+      final mapa = <String, String>{};
+      for (final doc in snapshot.docs) {
+        final data    = doc.data();
+        final nombre  = data['nombre']  as String? ?? '';
+        final prefijo = data['prefijo'] as String? ?? '';
+        if (prefijo.length == 2 && nombre.isNotEmpty) {
+          mapa[prefijo] = nombre;
+        }
+      }
+      return mapa;
+    } catch (e) {
+      print('❌ Error al obtener prefijos: $e');
+      return {};
+    }
+  }
+
   Future<Map<String, dynamic>> crearCategoria({
     required String nombre,
     String? descripcion,
+    String? prefijo,              // ← NUEVO
   }) async {
     try {
-      // Verificar si ya existe una categoría activa con ese nombre
       final existing = await _firestore
           .collection('tipo_producto')
           .where('nombre', isEqualTo: nombre)
@@ -61,11 +86,30 @@ class ProductoServiceAdmin {
         };
       }
 
-      // Crear nueva categoría desde cero (siempre)
+      // Verificar que el prefijo no esté ya en uso
+      if (prefijo != null && prefijo.length == 2) {
+        final prefijoExistente = await _firestore
+            .collection('tipo_producto')
+            .where('prefijo', isEqualTo: prefijo)
+            .where('activo', isEqualTo: true)
+            .get();
+
+        if (prefijoExistente.docs.isNotEmpty) {
+          final nombreExistente =
+              prefijoExistente.docs.first.data()['nombre'] ?? '';
+          return {
+            'exito': false,
+            'mensaje':
+                'El prefijo "$prefijo" ya está en uso por "$nombreExistente"',
+          };
+        }
+      }
+
       await _firestore.collection('tipo_producto').add({
-        'nombre': nombre,
-        'descripcion': descripcion ?? '',
-        'activo': true,
+        'nombre':        nombre,
+        'descripcion':   descripcion ?? '',
+        'prefijo':       prefijo ?? '',   // ← NUEVO
+        'activo':        true,
         'fechaCreacion': FieldValue.serverTimestamp(),
       });
 
@@ -86,7 +130,6 @@ class ProductoServiceAdmin {
         return {'exito': false, 'mensaje': 'Categoría no encontrada'};
       }
 
-      // ✅ BORRAR el documento completamente de Firestore
       await snapshot.docs.first.reference.delete();
 
       return {'exito': true, 'mensaje': 'Categoría eliminada exitosamente'};
@@ -140,18 +183,20 @@ class ProductoServiceAdmin {
     required String idAdmin,
     String? imagenUrl,
     int stock = 0,
+    String codigo = '',
   }) async {
     try {
       print('💾 Guardando producto con imagen URL: $imagenUrl');
 
       final docRef = await _firestore.collection('productos').add({
-        'nombre': nombre,
-        'precio': precio,
+        'nombre':    nombre,
+        'precio':    precio,
         'categoria': categoria,
-        'subtexto': subtexto,
-        'imagen': (imagenUrl != null && imagenUrl.isNotEmpty) ? imagenUrl : '',
-        'activo': true,
-        'stock': stock,
+        'subtexto':  subtexto,
+        'imagen':    (imagenUrl != null && imagenUrl.isNotEmpty) ? imagenUrl : '',
+        'activo':    true,
+        'stock':     stock,
+        'codigo':    codigo,
         'fechaCreacion': FieldValue.serverTimestamp(),
         'creadoPor': idAdmin,
       });
@@ -177,23 +222,20 @@ class ProductoServiceAdmin {
     required String subtexto,
     String? imagenUrl,
     int? stock,
+    String? codigo,
   }) async {
     try {
       final Map<String, dynamic> datos = {
-        'nombre': nombre,
-        'precio': precio,
+        'nombre':    nombre,
+        'precio':    precio,
         'categoria': categoria,
-        'subtexto': subtexto,
+        'subtexto':  subtexto,
         'fechaActualizacion': FieldValue.serverTimestamp(),
       };
 
-      if (imagenUrl != null) {
-        datos['imagen'] = imagenUrl;
-      }
-
-      if (stock != null) {
-        datos['stock'] = stock;
-      }
+      if (imagenUrl != null) datos['imagen'] = imagenUrl;
+      if (stock != null)     datos['stock']  = stock;
+      if (codigo != null)    datos['codigo'] = codigo;
 
       await _firestore
           .collection('productos')

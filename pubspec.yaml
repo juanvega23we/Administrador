@@ -1,5 +1,5 @@
 name: admin_web_panel
-description: "Panel de administración para El Gran Molino"
+description: "Panel de administración para Granero del Norte"
 publish_to: 'none'
 
 version: 1.0.0+1
@@ -11,23 +11,25 @@ dependencies:
   flutter:
     sdk: flutter
 
-  excel: ^4.0.6
+  shared_preferences: ^2.2.2
+  http: ^1.2.0
   pdf: ^3.10.8
   printing: ^5.12.0
 
-  # Firebase - Versiones compatibles (importantes)
+  # Firebase
   firebase_core: ^3.6.0
   cloud_firestore: ^5.4.4
-
+  firebase_auth: ^5.3.1
   firebase_storage: ^12.3.4
   image_picker: ^1.1.2
+  cloud_functions: ^5.0.0
 
-  
-  # Formateo de fechas
+  fl_chart: ^1.1.1
   intl: ^0.19.0
-  
-  # UI
   cupertino_icons: ^1.0.8
+
+  # Backup — descarga de archivos en Flutter Web
+  universal_html: ^2.2.4
 
 dev_dependencies:
   flutter_test:
@@ -36,3 +38,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/images/logo_granero.jpeg

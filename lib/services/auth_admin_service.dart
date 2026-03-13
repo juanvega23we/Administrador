@@ -1,281 +1,153 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
-import 'dart:html' as html show window; // Solo para web
+// lib/services/auth_admin_service.dart
 
-/// Servicio de autenticación para administradores
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
 class AuthAdminService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
-  
-  // Clave para localStorage (solo web)
-  static const String _sessionKey = 'admin_session_id';
+  final FirebaseAuth _auth = FirebaseAuth.instance;
 
-  /// Crear admin inicial (SOLO PARA DESARROLLO)
-  Future<void> crearAdminInicial() async {
+  Future<Map<String, dynamic>> loginAdmin(String email, String password) async {
     try {
-      // Verificar si ya existe un admin
-      final adminQuery = await _db
-          .collection('administradores')
-          .where('usuario', isEqualTo: 'admin')
-          .limit(1)
-          .get();
+      final credential = await _auth.signInWithEmailAndPassword(
+        email: email.trim(), password: password.trim(),
+      );
+      final uid = credential.user!.uid;
 
-      if (adminQuery.docs.isEmpty) {
-        // Crear admin por defecto
-        final adminRef = _db.collection('administradores').doc();
-        await adminRef.set({
-          'idAdmin': adminRef.id,
-          'usuario': 'admin',
-          'password': '1234', // ⚠️ EN PRODUCCIÓN usar hash
-          'nombre': 'Administrador',
-          'email': 'admin@granmolino.com',
-          'rol': 'super_admin',
-          'activo': true,
-          'fechaCreacion': FieldValue.serverTimestamp(),
-        });
-        print('✅ Admin inicial creado: admin / 1234');
-      }
-    } catch (e) {
-      print('Error al crear admin inicial: $e');
-    }
-  }
-
-  /// Login de administrador
-  Future<Map<String, dynamic>> loginAdmin(
-    String usuario,
-    String password,
-  ) async {
-    try {
-      // Buscar admin en Firestore
-      final querySnapshot = await _db
-          .collection('administradores')
-          .where('usuario', isEqualTo: usuario)
-          .where('activo', isEqualTo: true)
-          .limit(1)
-          .get();
-
-      if (querySnapshot.docs.isEmpty) {
-        return {
-          'exito': false,
-          'mensaje': 'Usuario no encontrado o inactivo',
-        };
+      final adminDoc = await _db.collection('administradores').doc(uid).get();
+      if (!adminDoc.exists) {
+        await _auth.signOut();
+        return {'exito': false, 'mensaje': 'No tienes permisos de administrador'};
       }
 
-      final adminDoc = querySnapshot.docs.first;
-      final adminData = adminDoc.data();
+      final data = adminDoc.data()!;
 
-      // Verificar contraseña (en producción usar hash)
-      if (adminData['password'] != password) {
-        return {
-          'exito': false,
-          'mensaje': 'Contraseña incorrecta',
-        };
+      // Verificar activo
+      if (data['activo'] != true) {
+        await _auth.signOut();
+        return {'exito': false, 'mensaje': 'Tu cuenta ha sido suspendida. Contacta al proveedor.'};
       }
 
-      // Guardar sesión (solo en web)
-      if (kIsWeb) {
-        html.window.localStorage[_sessionKey] = adminDoc.id;
+      // Verificar vencimiento (solo para rol admin, no super_admin)
+      if (data['rol'] == 'admin') {
+        final venc = data['fechaVencimiento'] as Timestamp?;
+        if (venc != null && venc.toDate().isBefore(DateTime.now())) {
+          await _db.collection('administradores').doc(uid).update({'activo': false});
+          await _auth.signOut();
+          return {'exito': false, 'mensaje': 'Tu licencia ha vencido. Contacta al proveedor para renovar.'};
+        }
       }
 
-      // Registrar último acceso
-      await adminDoc.reference.update({
+      // Verificar rol
+      if (data['rol'] != 'super_admin' && data['rol'] != 'admin') {
+        await _auth.signOut();
+        return {'exito': false, 'mensaje': 'No tienes permisos suficientes'};
+      }
+
+      await _db.collection('administradores').doc(uid).update({
         'ultimoAcceso': FieldValue.serverTimestamp(),
       });
 
       return {
         'exito': true,
-        'mensaje': 'Bienvenido ${adminData['nombre']}',
+        'mensaje': 'Bienvenido ${data['nombre']}',
+        'primerLogin': data['primerLogin'] == true, // ✅ CORREGIDO
         'admin': {
-          'idAdmin': adminDoc.id,
-          'usuario': adminData['usuario'],
-          'nombre': adminData['nombre'],
-          'email': adminData['email'],
-          'rol': adminData['rol'],
+          'id': uid,
+          'nombre': data['nombre'],
+          'email': data['email'],
+          'rol': data['rol'],
+          'negocio': data['negocio'] ?? 'Granero del Norte',
         },
       };
+    } on FirebaseAuthException catch (e) {
+      return {'exito': false, 'mensaje': _traducirError(e.code)};
     } catch (e) {
-      return {
-        'exito': false,
-        'mensaje': 'Error en el servidor: $e',
-      };
+      return {'exito': false, 'mensaje': 'Error inesperado, intenta de nuevo'};
     }
   }
 
-  /// Verificar si hay sesión activa (⭐ MÉTODO NUEVO)
   Future<Map<String, dynamic>?> verificarSesionActiva() async {
     try {
-      // Solo funciona en web
-      if (!kIsWeb) return null;
+      final user = _auth.currentUser;
+      if (user == null) return null;
 
-      // Obtener ID de sesión del localStorage
-      final sessionId = html.window.localStorage[_sessionKey];
-      
-      if (sessionId == null || sessionId.isEmpty) {
-        return null; // No hay sesión guardada
+      final adminDoc = await _db.collection('administradores').doc(user.uid).get();
+      if (!adminDoc.exists) return null;
+
+      final data = adminDoc.data()!;
+      if (data['activo'] != true) return null;
+      if (data['rol'] != 'super_admin' && data['rol'] != 'admin') return null;
+
+      // Verificar vencimiento
+      if (data['rol'] == 'admin') {
+        final venc = data['fechaVencimiento'] as Timestamp?;
+        if (venc != null && venc.toDate().isBefore(DateTime.now())) {
+          await _db.collection('administradores').doc(user.uid).update({'activo': false});
+          await _auth.signOut();
+          return null;
+        }
       }
 
-      // Verificar que el admin aún existe y está activo
-      final adminDoc = await _db
+      return {
+        'id': user.uid,
+        'nombre': data['nombre'],
+        'email': data['email'],
+        'rol': data['rol'],
+        'negocio': data['negocio'] ?? 'Granero del Norte',
+        'primerLogin': data['primerLogin'] == true, // ✅ CORREGIDO
+      };
+    } catch (_) { return null; }
+  }
+
+  Future<void> cerrarSesion() async => await _auth.signOut();
+
+  Future<Map<String, dynamic>> cambiarPassword(String passwordActual, String passwordNueva) async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return {'exito': false, 'mensaje': 'No hay sesión activa'};
+      final credential = EmailAuthProvider.credential(email: user.email!, password: passwordActual);
+      await user.reauthenticateWithCredential(credential);
+      await user.updatePassword(passwordNueva);
+      return {'exito': true, 'mensaje': 'Contraseña actualizada correctamente'};
+    } on FirebaseAuthException catch (e) {
+      return {'exito': false, 'mensaje': _traducirError(e.code)};
+    } catch (_) {
+      return {'exito': false, 'mensaje': 'Error al cambiar contraseña'};
+    }
+  }
+
+  Future<bool> marcarPrimerLoginCompleto() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return false;
+
+      await FirebaseFirestore.instance
           .collection('administradores')
-          .doc(sessionId)
-          .get();
-
-      if (!adminDoc.exists) {
-        // La sesión no es válida, limpiar localStorage
-        html.window.localStorage.remove(_sessionKey);
-        return null;
-      }
-
-      final adminData = adminDoc.data()!;
-
-      // Verificar que el admin está activo
-      if (adminData['activo'] != true) {
-        html.window.localStorage.remove(_sessionKey);
-        return null;
-      }
-
-      // Sesión válida, retornar datos del admin
-      return {
-        'idAdmin': adminDoc.id,
-        'usuario': adminData['usuario'],
-        'nombre': adminData['nombre'],
-        'email': adminData['email'],
-        'rol': adminData['rol'],
-      };
-    } catch (e) {
-      print('Error al verificar sesión: $e');
-      return null;
-    }
-  }
-
-  /// Cerrar sesión
-  Future<void> cerrarSesion() async {
-    if (kIsWeb) {
-      html.window.localStorage.remove(_sessionKey);
-    }
-  }
-
-  /// Cambiar contraseña de administrador
-  Future<Map<String, dynamic>> cambiarPassword(
-    String idAdmin,
-    String passwordActual,
-    String passwordNueva,
-  ) async {
-    try {
-      final adminDoc = await _db.collection('administradores').doc(idAdmin).get();
-      
-      if (!adminDoc.exists) {
-        return {
-          'exito': false,
-          'mensaje': 'Administrador no encontrado',
-        };
-      }
-
-      final adminData = adminDoc.data()!;
-
-      // Verificar contraseña actual
-      if (adminData['password'] != passwordActual) {
-        return {
-          'exito': false,
-          'mensaje': 'Contraseña actual incorrecta',
-        };
-      }
-
-      // Actualizar contraseña
-      await adminDoc.reference.update({
-        'password': passwordNueva, // ⚠️ EN PRODUCCIÓN usar hash
-        'fechaUltimoCambioPassword': FieldValue.serverTimestamp(),
+          .doc(user.uid)
+          .update({
+        'primerLogin': false,
+        'actualizadoEn': FieldValue.serverTimestamp(),
       });
-
-      return {
-        'exito': true,
-        'mensaje': 'Contraseña actualizada exitosamente',
-      };
+      return true;
     } catch (e) {
-      return {
-        'exito': false,
-        'mensaje': 'Error al cambiar contraseña: $e',
-      };
+      print("Error: $e");
+      return false;
     }
   }
 
-  /// Crear nuevo administrador (solo super_admin)
-  Future<Map<String, dynamic>> crearNuevoAdmin({
-    required String usuario,
-    required String password,
-    required String nombre,
-    required String email,
-    String rol = 'admin',
-  }) async {
-    try {
-      // Verificar si el usuario ya existe
-      final existeQuery = await _db
-          .collection('administradores')
-          .where('usuario', isEqualTo: usuario)
-          .limit(1)
-          .get();
-
-      if (existeQuery.docs.isNotEmpty) {
-        return {
-          'exito': false,
-          'mensaje': 'El usuario ya existe',
-        };
-      }
-
-      // Crear nuevo admin
-      final adminRef = _db.collection('administradores').doc();
-      await adminRef.set({
-        'idAdmin': adminRef.id,
-        'usuario': usuario,
-        'password': password, // ⚠️ EN PRODUCCIÓN usar hash
-        'nombre': nombre,
-        'email': email,
-        'rol': rol,
-        'activo': true,
-        'fechaCreacion': FieldValue.serverTimestamp(),
-      });
-
-      return {
-        'exito': true,
-        'mensaje': 'Administrador creado exitosamente',
-        'idAdmin': adminRef.id,
-      };
-    } catch (e) {
-      return {
-        'exito': false,
-        'mensaje': 'Error al crear administrador: $e',
-      };
+  String _traducirError(String code) {
+    switch (code) {
+      case 'user-not-found': return 'No existe una cuenta con este email';
+      case 'wrong-password': return 'Contraseña incorrecta';
+      case 'invalid-email': return 'El email no es válido';
+      case 'user-disabled': return 'Esta cuenta está desactivada';
+      case 'too-many-requests': return 'Demasiados intentos, espera unos minutos';
+      case 'network-request-failed': return 'Sin conexión a internet';
+      case 'invalid-credential': return 'Email o contraseña incorrectos';
+      default: return 'Error de autenticación';
     }
   }
 
-  /// Obtener todos los administradores
-  Stream<List<Map<String, dynamic>>> obtenerAdministradores() {
-    return _db
-        .collection('administradores')
-        .orderBy('fechaCreacion', descending: true)
-        .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) => doc.data()).toList());
-  }
-
-  /// Activar/Desactivar administrador
-  Future<Map<String, dynamic>> cambiarEstadoAdmin(
-    String idAdmin,
-    bool activo,
-  ) async {
-    try {
-      await _db.collection('administradores').doc(idAdmin).update({
-        'activo': activo,
-        'fechaActualizacion': FieldValue.serverTimestamp(),
-      });
-
-      return {
-        'exito': true,
-        'mensaje': activo ? 'Administrador activado' : 'Administrador desactivado',
-      };
-    } catch (e) {
-      return {
-        'exito': false,
-        'mensaje': 'Error al actualizar estado: $e',
-      };
-    }
-  }
+  Future<void> crearAdminInicial() async {}
 }
