@@ -2,6 +2,7 @@
 
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -24,6 +25,8 @@ class _BackupPageState extends State<BackupPage> {
   bool _cargandoListar   = true;
   bool _restaurando      = false;
 
+  Timer? _timerBackup;
+
   List<Map<String, dynamic>> _backups = [];
   final List<Map<String, dynamic>> _historialSesion = [];
 
@@ -31,6 +34,34 @@ class _BackupPageState extends State<BackupPage> {
   void initState() {
     super.initState();
     _cargarListaBackups();
+    _programarBackupDiario();
+  }
+
+  @override
+  void dispose() {
+    _timerBackup?.cancel();
+    super.dispose();
+  }
+
+  // ── Programa el backup automático a las 12:00am ───────────────
+  void _programarBackupDiario() {
+    final ahora   = DateTime.now();
+    final manana  = DateTime(ahora.year, ahora.month, ahora.day + 1, 0, 0, 0);
+    final demora  = manana.difference(ahora);
+
+    _timerBackup = Timer(demora, () {
+      _ejecutarBackupAutomatico();
+      // Repetir cada 24 horas
+      _timerBackup = Timer.periodic(const Duration(hours: 24), (_) {
+        _ejecutarBackupAutomatico();
+      });
+    });
+  }
+
+  // ── Ejecuta el backup automático y refresca la lista ─────────
+  Future<void> _ejecutarBackupAutomatico() async {
+    await _service.backupAutomatico();
+    if (mounted) _cargarListaBackups();
   }
 
   // ── Listar backups en Storage ─────────────────────────────────
@@ -89,7 +120,6 @@ class _BackupPageState extends State<BackupPage> {
 
   // ── Restaurar desde archivo local ─────────────────────────────
   Future<void> _restaurarDesdeArchivo() async {
-    // Abrir selector de archivo en el navegador
     final input = html.FileUploadInputElement()..accept = '.json';
     input.click();
     await input.onChange.first;
@@ -157,7 +187,6 @@ class _BackupPageState extends State<BackupPage> {
             ],
           ),
         ),
-        // Overlay de restauración
         if (_restaurando)
           Container(
             color: Colors.black54,
@@ -253,7 +282,6 @@ class _BackupPageState extends State<BackupPage> {
   // ── Botones de acción ─────────────────────────────────────────
   Widget _buildAcciones() {
     return Row(children: [
-      // Descargar manual
       Expanded(
         child: _TarjetaAccion(
           icon: Icons.download_rounded,
@@ -265,7 +293,6 @@ class _BackupPageState extends State<BackupPage> {
         ),
       ),
       const SizedBox(width: 16),
-      // Restaurar desde archivo
       Expanded(
         child: _TarjetaAccion(
           icon: Icons.upload_file_rounded,
@@ -280,7 +307,7 @@ class _BackupPageState extends State<BackupPage> {
     ]);
   }
 
-  // ── Banner último backup diario ──────────────────────────────
+  // ── Banner último backup diario ───────────────────────────────
   Widget _buildBannerUltimoBackupDiario() {
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
@@ -301,21 +328,21 @@ class _BackupPageState extends State<BackupPage> {
           );
         }
 
-        // Sin datos todavía (nunca se ha ejecutado)
+        // Sin datos — nunca se ha ejecutado
         if (!snapshot.hasData || !snapshot.data!.exists) {
           return _bannerInfo(
             Icons.schedule_rounded,
-            'El backup automático aún no se ha ejecutado — se hará hoy a las 12:00am',
+            'El backup automático aún no se ha ejecutado — se hará esta noche a las 12:00am',
             Colors.orange,
           );
         }
 
-        final data    = snapshot.data!.data() as Map<String, dynamic>;
-        final exito   = data['exito'] == true;
-        final fecha   = (data['fecha'] as Timestamp?)?.toDate();
-        final docs    = data['totalDocs'] ?? 0;
-        final kb      = data['tamanoKB'] ?? 0;
-        final error   = data['error'] as String?;
+        final data  = snapshot.data!.data() as Map<String, dynamic>;
+        final exito = data['exito'] == true;
+        final fecha = (data['fecha'] as Timestamp?)?.toDate();
+        final docs  = data['totalDocs'] ?? 0;
+        final kb    = data['tamanoKB']  ?? 0;
+        final error = data['error']     as String?;
 
         String fechaStr = '—';
         if (fecha != null) {
@@ -325,13 +352,13 @@ class _BackupPageState extends State<BackupPage> {
         if (exito) {
           return _bannerInfo(
             Icons.cloud_done_rounded,
-            'Último backup automático:  —  documentos ·  KB',
+            'Último backup automático: $fechaStr — $docs documentos · $kb KB',
             const Color(0xFF16A34A),
           );
         } else {
           return _bannerInfo(
             Icons.cloud_off_rounded,
-            'El último backup automático falló (): ${error ?? "error desconocido"}',
+            'Último backup falló ($fechaStr): ${error ?? "error desconocido"}',
             Colors.red,
           );
         }

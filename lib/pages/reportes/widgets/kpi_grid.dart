@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
-const _kColor = Color(0xFF00897B); // antes 0xFF8B0000
+const _kColor = Color(0xFF00897B);
 
 class KpiGrid extends StatelessWidget {
   final int    totalPedidos;
@@ -11,6 +11,7 @@ class KpiGrid extends StatelessWidget {
   final int    entregados;
   final int    pendientes;
   final int    cancelados;
+  final int    confirmados; // ← nuevo parámetro
 
   const KpiGrid({
     super.key,
@@ -20,6 +21,7 @@ class KpiGrid extends StatelessWidget {
     required this.entregados,
     required this.pendientes,
     required this.cancelados,
+    required this.confirmados, // ← nuevo
   });
 
   @override
@@ -28,56 +30,79 @@ class KpiGrid extends StatelessWidget {
         ? '${(n / totalPedidos * 100).toStringAsFixed(1)}% del total'
         : '0% del total';
 
-    return GridView.count(
-      crossAxisCount: 3,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 12,
-      mainAxisSpacing: 12,
-      childAspectRatio: 2.2,
+    return Column(
       children: [
-        _KpiCard(
-            label: 'Total Pedidos',
-            value: '$totalPedidos',
-            icon: Icons.shopping_cart_rounded,
-            accent: const Color(0xFFD35400),
-            sub: 'en el período'),
-        _KpiCard(
-            label: 'Ingresos',
-            value: '\$ ${NumberFormat('#,##0', 'es_CO').format(ingresos.round())}',
-            icon: Icons.payments_rounded,
-            accent: _kColor,
-            sub: 'confirmados + entregados'),
-        _KpiCard(
-            label: 'Ticket Promedio',
-            value: '\$ ${NumberFormat('#,##0', 'es_CO').format(ticketPromedio.round())}',
-            icon: Icons.trending_up_rounded,
-            accent: const Color(0xFF00695C), // antes 0xFF8B0000
-            sub: 'por pedido activo'),
-        _KpiCard(
-            label: 'Entregados',
-            value: '$entregados',
-            icon: Icons.check_circle_rounded,
-            accent: _kColor,
-            sub: pct(entregados)),
-        _KpiCard(
-            label: 'Pendientes',
-            value: '$pendientes',
-            icon: Icons.hourglass_empty_rounded,
-            accent: Colors.orange,
-            sub: pct(pendientes)),
-        _KpiCard(
-            label: 'Cancelados',
-            value: '$cancelados',
-            icon: Icons.cancel_rounded,
-            accent: Colors.redAccent,
-            sub: pct(cancelados)),
+        // ── Fila 1: métricas principales (3 tarjetas) ──────────
+        GridView.count(
+          crossAxisCount: 3,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          childAspectRatio: 2.2,
+          children: [
+            _KpiCard(
+                label: 'Total Pedidos',
+                value: '$totalPedidos',
+                icon: Icons.shopping_cart_rounded,
+                accent: const Color(0xFFD35400),
+                sub: 'en el período'),
+            _KpiCard(
+                label: 'Ingresos',
+                value: '\$ ${NumberFormat('#,##0', 'es_CO').format(ingresos.round())}',
+                icon: Icons.payments_rounded,
+                accent: _kColor,
+                sub: 'solo pedidos entregados'),
+            _KpiCard(
+                label: 'Ticket Promedio',
+                value: '\$ ${NumberFormat('#,##0', 'es_CO').format(ticketPromedio.round())}',
+                icon: Icons.trending_up_rounded,
+                accent: const Color(0xFF00695C),
+                sub: 'por pedido activo'),
+          ],
+        ),
+        const SizedBox(height: 12),
+        // ── Fila 2: los 4 estados (4 tarjetas) ─────────────────
+        GridView.count(
+          crossAxisCount: 4,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          childAspectRatio: 2.2,
+          children: [
+            _KpiCard(
+                label: 'Confirmados',
+                value: '$confirmados',
+                icon: Icons.thumb_up_alt_rounded,
+                accent: const Color(0xFF1976D2),
+                sub: pct(confirmados)),
+            _KpiCard(
+                label: 'Entregados',
+                value: '$entregados',
+                icon: Icons.check_circle_rounded,
+                accent: _kColor,
+                sub: pct(entregados)),
+            _KpiCard(
+                label: 'Pendientes',
+                value: '$pendientes',
+                icon: Icons.hourglass_empty_rounded,
+                accent: Colors.orange,
+                sub: pct(pendientes)),
+            _KpiCard(
+                label: 'Cancelados',
+                value: '$cancelados',
+                icon: Icons.cancel_rounded,
+                accent: Colors.redAccent,
+                sub: pct(cancelados)),
+          ],
+        ),
       ],
     );
   }
 }
 
-// ── _KpiCard (mismo diseño original) ─────────────────────────
+// ── _KpiCard ──────────────────────────────────────────────────
 class _KpiCard extends StatelessWidget {
   final String label, value, sub;
   final IconData icon;

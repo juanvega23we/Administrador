@@ -23,10 +23,11 @@ class DashboardSidebar extends StatelessWidget {
   });
 
   static const _itemsBase = [
-    _NavItem(Icons.dashboard_rounded,    'Dashboard'),
-    _NavItem(Icons.storefront_rounded,   'Productos'),
-    _NavItem(Icons.receipt_long_rounded, 'Pedidos'),
-    _NavItem(Icons.bar_chart_rounded,    'Reportes'),
+    _NavItem(Icons.dashboard_rounded,        'Dashboard'),
+    _NavItem(Icons.storefront_rounded,       'Productos'),
+    _NavItem(Icons.receipt_long_rounded,     'Pedidos'),
+    _NavItem(Icons.assignment_return_rounded,'Devoluciones'),
+    _NavItem(Icons.bar_chart_rounded,        'Reportes'),
   ];
 
   static const _itemBackup     = _NavItem(Icons.backup_rounded, 'Backup');
@@ -136,20 +137,23 @@ class DashboardSidebar extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 18),
-          // Items de navegación
+          // Items de navegación — scrollable para que no haga overflow
+          // cuando hay muchos items (ej: super admin con Backup + Super Admin)
           Expanded(
-            child: Column(
-              children: items.asMap().entries.map((e) {
-                final isSuperAdminItem =
-                    esSuperAdmin && e.key == items.length - 1;
-                return _SidebarNavItem(
-                  icon: e.value.icon,
-                  label: e.value.label,
-                  selected: selectedIndex == e.key,
-                  accentColor: isSuperAdminItem ? Colors.amber : _green300,
-                  onTap: () => onItemSelected(e.key),
-                );
-              }).toList(),
+            child: SingleChildScrollView(
+              child: Column(
+                children: items.asMap().entries.map((e) {
+                  final isSuperAdminItem =
+                      esSuperAdmin && e.key == items.length - 1;
+                  return _SidebarNavItem(
+                    icon: e.value.icon,
+                    label: e.value.label,
+                    selected: selectedIndex == e.key,
+                    accentColor: isSuperAdminItem ? Colors.amber : _green300,
+                    onTap: () => onItemSelected(e.key),
+                  );
+                }).toList(),
+              ),
             ),
           ),
           // Botón salir
@@ -212,16 +216,16 @@ class _SidebarNavItemState extends State<_SidebarNavItem>
   Widget build(BuildContext context) {
     return GestureDetector(
       onTapDown: (_) => _ctrl.forward(),
-      onTapUp: (_) {
-        _ctrl.reverse();
-        widget.onTap();
-      },
-      onTapCancel: () => _ctrl.reverse(),
-      child: ScaleTransition(
-        scale: _scale,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        onTapUp: (_) {
+          _ctrl.reverse();
+          widget.onTap();
+        },
+        onTapCancel: () => _ctrl.reverse(),
+        child: ScaleTransition(
+          scale: _scale,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
@@ -299,16 +303,16 @@ class _SidebarLogoutState extends State<_SidebarLogout> {
       onExit: (_) => setState(() => _hovered = false),
       child: GestureDetector(
         onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          margin: const EdgeInsets.symmetric(horizontal: 10),
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            color:
-                _hovered ? Colors.red.withOpacity(0.2) : Colors.transparent,
-          ),
-          child: Column(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            margin: const EdgeInsets.symmetric(horizontal: 10),
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              color:
+                  _hovered ? Colors.red.withOpacity(0.2) : Colors.transparent,
+            ),
+            child: Column(
             children: [
               Icon(
                 Icons.logout_rounded,

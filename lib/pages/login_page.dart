@@ -23,6 +23,13 @@ class _AdminLoginPageState extends State<AdminLoginPage>
   bool _cargando    = false;
   bool _mostrarPass = false;
 
+  // ── Límite de intentos ────────────────────────────────────
+  int      _intentosFallidos = 0;
+  bool     _bloqueado        = false;
+  int      _segundosRestantes = 0;
+  static const int _maxIntentos    = 5;
+  static const int _tiempoBloqueo  = 30; // segundos
+
   late AnimationController _entradaCtrl;
   late AnimationController _floatCtrl;
   late AnimationController _pulseCtrl;
@@ -144,7 +151,6 @@ class _AdminLoginPageState extends State<AdminLoginPage>
           curve: Interval(0.4 + start, 0.7 + start,
               curve: Curves.easeOutCubic)));
 
-  // ✅ CORREGIDO: también chequea primerLogin en sesión activa
   Future<void> _verificarSesion() async {
     final s = await _authService.verificarSesionActiva();
     if (s != null && mounted) {
@@ -166,8 +172,32 @@ class _AdminLoginPageState extends State<AdminLoginPage>
     }
   }
 
-  // ✅ CORREGIDO: lee primerLogin del resultado del login
+  // ── Temporizador de bloqueo ───────────────────────────────
+  void _iniciarBloqueo() {
+    setState(() {
+      _bloqueado         = true;
+      _segundosRestantes = _tiempoBloqueo;
+    });
+    _tickBloqueo();
+  }
+
+  void _tickBloqueo() {
+    Future.delayed(const Duration(seconds: 1), () {
+      if (!mounted) return;
+      setState(() => _segundosRestantes--);
+      if (_segundosRestantes > 0) {
+        _tickBloqueo();
+      } else {
+        setState(() {
+          _bloqueado        = false;
+          _intentosFallidos = 0;
+        });
+      }
+    });
+  }
+
   Future<void> _login() async {
+    if (_bloqueado) return;
     if (!_formKey.currentState!.validate()) return;
     FocusScope.of(context).unfocus();
     setState(() => _cargando = true);
@@ -179,7 +209,9 @@ class _AdminLoginPageState extends State<AdminLoginPage>
     setState(() => _cargando = false);
 
     if (res['exito'] == true) {
-      // Primer login → forzar cambio de contraseña
+      // Login exitoso → resetear intentos
+      setState(() => _intentosFallidos = 0);
+
       if (res['primerLogin'] == true) {
         Navigator.pushReplacement(
           context,
@@ -194,7 +226,6 @@ class _AdminLoginPageState extends State<AdminLoginPage>
         return;
       }
 
-      // Login normal
       Navigator.pushReplacement(context,
           PageRouteBuilder(
             pageBuilder: (_, __, ___) =>
@@ -206,8 +237,21 @@ class _AdminLoginPageState extends State<AdminLoginPage>
     } else {
       HapticFeedback.vibrate();
       _entradaCtrl.reverse().then((_) => _entradaCtrl.forward());
-      NotificacionPersonalizada.mostrarSnack(context,
-          mensaje: res['mensaje'], tipo: TipoNotificacion.error);
+
+      setState(() => _intentosFallidos++);
+
+      final restantes = _maxIntentos - _intentosFallidos;
+
+      if (_intentosFallidos >= _maxIntentos) {
+        _iniciarBloqueo();
+        NotificacionPersonalizada.mostrarSnack(context,
+            mensaje: 'Demasiados intentos fallidos. Espera $_tiempoBloqueo segundos.',
+            tipo: TipoNotificacion.error);
+      } else {
+        NotificacionPersonalizada.mostrarSnack(context,
+            mensaje: '${res['mensaje']} · Te quedan $restantes intento${restantes == 1 ? '' : 's'}.',
+            tipo: TipoNotificacion.error);
+      }
     }
   }
 
@@ -233,7 +277,21 @@ class _AdminLoginPageState extends State<AdminLoginPage>
         opacity: _bgFade,
         child: Stack(
           children: [
-            _buildBgDecorations(size),
+            // ── Imagen de fondo completa + overlay ────────
+            Positioned.fill(
+              child: ColorFiltered(
+                colorFilter: ColorFilter.mode(
+                  _gris.withOpacity(0.72),
+                  BlendMode.srcOver,
+                ),
+                child: Image.asset(
+                  'assets/images/fondo_login.jpeg',
+                  fit: BoxFit.cover,
+                  alignment: Alignment.center,
+                  errorBuilder: (_, __, ___) => Container(color: _gris),
+                ),
+              ),
+            ),
             SafeArea(
               child: Center(
                 child: SingleChildScrollView(
@@ -247,83 +305,6 @@ class _AdminLoginPageState extends State<AdminLoginPage>
         ),
       ),
     );
-  }
-
-  Widget _buildBgDecorations(Size size) {
-    return Stack(children: [
-      Positioned(
-        top: -100, left: -100,
-        child: AnimatedBuilder(
-          animation: _floatCtrl,
-          builder: (_, __) => Transform.translate(
-            offset: Offset(_floatY.value * 0.5, _floatY.value),
-            child: Container(
-              width: 350, height: 350,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(colors: [
-                  _verde.withOpacity(0.08), _verde.withOpacity(0.0),
-                ]),
-              ),
-            ),
-          ),
-        ),
-      ),
-      Positioned(
-        bottom: -80, right: -80,
-        child: AnimatedBuilder(
-          animation: _floatCtrl,
-          builder: (_, __) => Transform.translate(
-            offset: Offset(-_floatY.value * 0.3, -_floatY.value * 0.7),
-            child: Container(
-              width: 300, height: 300,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(colors: [
-                  _verdeClaro.withOpacity(0.07), _verdeClaro.withOpacity(0.0),
-                ]),
-              ),
-            ),
-          ),
-        ),
-      ),
-      Positioned(
-        top: size.height * 0.15, right: size.width * 0.08,
-        child: AnimatedBuilder(
-          animation: _floatCtrl,
-          builder: (_, __) => Transform.translate(
-            offset: Offset(0, _floatY.value * 1.2),
-            child: Container(width: 14, height: 14,
-              decoration: BoxDecoration(shape: BoxShape.circle,
-                  color: _verdeClaro.withOpacity(0.3))),
-          ),
-        ),
-      ),
-      Positioned(
-        top: size.height * 0.6, left: size.width * 0.05,
-        child: AnimatedBuilder(
-          animation: _floatCtrl,
-          builder: (_, __) => Transform.translate(
-            offset: Offset(0, -_floatY.value),
-            child: Container(width: 10, height: 10,
-              decoration: BoxDecoration(shape: BoxShape.circle,
-                  color: _verde.withOpacity(0.2))),
-          ),
-        ),
-      ),
-      Positioned(
-        top: size.height * 0.35, right: size.width * 0.03,
-        child: AnimatedBuilder(
-          animation: _floatCtrl,
-          builder: (_, __) => Transform.translate(
-            offset: Offset(_floatY.value * 0.5, _floatY.value * 0.8),
-            child: Container(width: 7, height: 7,
-              decoration: BoxDecoration(shape: BoxShape.circle,
-                  color: _verde.withOpacity(0.15))),
-          ),
-        ),
-      ),
-    ]);
   }
 
   Widget _wideLayout() => Container(
@@ -508,6 +489,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                     icon: Icons.alternate_email_rounded,
                     tipo: TextInputType.emailAddress,
                     accion: TextInputAction.next,
+                    enabled: !_bloqueado,
                     validator: (v) {
                       if (v == null || v.trim().isEmpty) return 'Ingresa tu correo';
                       if (!v.contains('@')) return 'Correo inválido';
@@ -519,6 +501,7 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                     icon: Icons.lock_outline_rounded,
                     obscure: !_mostrarPass,
                     accion: TextInputAction.done,
+                    enabled: !_bloqueado,
                     onSubmit: (_) => _login(),
                     suffix: GestureDetector(
                       onTap: () => setState(() => _mostrarPass = !_mostrarPass),
@@ -533,8 +516,28 @@ class _AdminLoginPageState extends State<AdminLoginPage>
                       if (v.length < 6) return 'Mínimo 6 caracteres';
                       return null;
                     }),
-                  const SizedBox(height: 28),
-                  _BotonLogin(cargando: _cargando, onPressed: _login),
+                  const SizedBox(height: 16),
+
+                  // ── Barra de intentos ──────────────────────
+                  if (_intentosFallidos > 0 && !_bloqueado)
+                    _IntentosIndicador(
+                      intentos: _intentosFallidos,
+                      maxIntentos: _maxIntentos,
+                    ),
+                  if (_intentosFallidos > 0 && !_bloqueado)
+                    const SizedBox(height: 16),
+
+                  // ── Banner de bloqueo ──────────────────────
+                  if (_bloqueado)
+                    _BannerBloqueo(segundos: _segundosRestantes),
+                  if (_bloqueado)
+                    const SizedBox(height: 16),
+
+                  _BotonLogin(
+                    cargando: _cargando,
+                    bloqueado: _bloqueado,
+                    onPressed: _login,
+                  ),
                   const SizedBox(height: 24),
                   Container(
                     padding: const EdgeInsets.symmetric(
@@ -572,12 +575,13 @@ class _AdminLoginPageState extends State<AdminLoginPage>
     TextInputType tipo = TextInputType.text,
     TextInputAction accion = TextInputAction.next,
     bool obscure = false,
+    bool enabled = true,
     Widget? suffix,
     ValueChanged<String>? onSubmit,
     String? Function(String?)? validator,
   }) => TextFormField(
     controller: ctrl,
-    enabled: !_cargando,
+    enabled: !_cargando && enabled,
     keyboardType: tipo,
     textInputAction: accion,
     obscureText: obscure,
@@ -609,6 +613,95 @@ class _AdminLoginPageState extends State<AdminLoginPage>
       errorStyle: const TextStyle(color: Color(0xFFE53935), fontSize: 11),
     ),
   );
+}
+
+// ── Indicador de intentos restantes ──────────────────────────
+class _IntentosIndicador extends StatelessWidget {
+  final int intentos;
+  final int maxIntentos;
+  const _IntentosIndicador({required this.intentos, required this.maxIntentos});
+
+  @override
+  Widget build(BuildContext context) {
+    final restantes = maxIntentos - intentos;
+    final color = restantes <= 1
+        ? const Color(0xFFE53935)
+        : restantes <= 2
+            ? const Color(0xFFE67E22)
+            : const Color(0xFFD97706);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.25)),
+      ),
+      child: Row(children: [
+        Icon(Icons.warning_amber_rounded, color: color, size: 16),
+        const SizedBox(width: 10),
+        Expanded(child: Text(
+          'Contraseña incorrecta · $restantes intento${restantes == 1 ? '' : 's'} restante${restantes == 1 ? '' : 's'}',
+          style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600),
+        )),
+        // Puntos visuales de intentos
+        Row(
+          children: List.generate(maxIntentos, (i) => Container(
+            margin: const EdgeInsets.only(left: 4),
+            width: 8, height: 8,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: i < intentos ? color : color.withOpacity(0.2),
+            ),
+          )),
+        ),
+      ]),
+    );
+  }
+}
+
+// ── Banner de bloqueo con cuenta regresiva ────────────────────
+class _BannerBloqueo extends StatelessWidget {
+  final int segundos;
+  const _BannerBloqueo({required this.segundos});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE53935).withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE53935).withOpacity(0.3)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.lock_clock_rounded,
+            color: Color(0xFFE53935), size: 20),
+        const SizedBox(width: 12),
+        Expanded(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Cuenta bloqueada temporalmente',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+                  color: Color(0xFFE53935))),
+            const SizedBox(height: 2),
+            Text('Intenta de nuevo en $segundos segundo${segundos == 1 ? '' : 's'}',
+              style: TextStyle(fontSize: 11,
+                  color: const Color(0xFFE53935).withOpacity(0.75))),
+          ],
+        )),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: const Color(0xFFE53935),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text('$segundos s',
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800,
+                color: Colors.white)),
+        ),
+      ]),
+    );
+  }
 }
 
 // ── Cabecera ──────────────────────────────────────────────────
@@ -751,8 +844,13 @@ class _FeatureCardState extends State<_FeatureCard>
 // ── Botón login ───────────────────────────────────────────────
 class _BotonLogin extends StatefulWidget {
   final bool cargando;
+  final bool bloqueado;
   final VoidCallback onPressed;
-  const _BotonLogin({required this.cargando, required this.onPressed});
+  const _BotonLogin({
+    required this.cargando,
+    required this.bloqueado,
+    required this.onPressed,
+  });
 
   @override
   State<_BotonLogin> createState() => _BotonLoginState();
@@ -782,6 +880,7 @@ class _BotonLoginState extends State<_BotonLogin>
 
   @override
   Widget build(BuildContext context) {
+    final deshabilitado = widget.cargando || widget.bloqueado;
     return MouseRegion(
       onEnter: (_) { setState(() => _hovered = true); _hoverCtrl.forward(); },
       onExit:  (_) { setState(() => _hovered = false); _hoverCtrl.reverse(); },
@@ -793,11 +892,11 @@ class _BotonLoginState extends State<_BotonLogin>
             width: double.infinity, height: 54,
             child: DecoratedBox(
               decoration: BoxDecoration(
-                gradient: widget.cargando ? null : const LinearGradient(
+                gradient: deshabilitado ? null : const LinearGradient(
                   colors: [_verde, _verdeClaro],
                   begin: Alignment.centerLeft, end: Alignment.centerRight),
                 borderRadius: BorderRadius.circular(14),
-                boxShadow: widget.cargando ? [] : [
+                boxShadow: deshabilitado ? [] : [
                   BoxShadow(
                     color: _verde.withOpacity(_hovered ? 0.5 : 0.3),
                     blurRadius: _hovered ? 24 : 16,
@@ -805,7 +904,7 @@ class _BotonLoginState extends State<_BotonLogin>
                 ],
               ),
               child: ElevatedButton(
-                onPressed: widget.cargando ? null : widget.onPressed,
+                onPressed: deshabilitado ? null : widget.onPressed,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.transparent,
                   shadowColor: Colors.transparent,
@@ -817,17 +916,29 @@ class _BotonLoginState extends State<_BotonLogin>
                     ? const SizedBox(width: 22, height: 22,
                         child: CircularProgressIndicator(
                             color: _verde, strokeWidth: 2.5))
-                    : const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.login_rounded, color: _blanco, size: 20),
-                          SizedBox(width: 10),
-                          Text('Ingresar al Panel',
-                            style: TextStyle(fontSize: 16,
-                                fontWeight: FontWeight.w800,
-                                color: _blanco, letterSpacing: 0.3)),
-                        ],
-                      ),
+                    : widget.bloqueado
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.lock_rounded,
+                                  color: Colors.grey[400], size: 18),
+                              const SizedBox(width: 8),
+                              Text('Cuenta bloqueada',
+                                style: TextStyle(fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.grey[400])),
+                            ])
+                        : const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.login_rounded, color: _blanco, size: 20),
+                              SizedBox(width: 10),
+                              Text('Ingresar al Panel',
+                                style: TextStyle(fontSize: 16,
+                                    fontWeight: FontWeight.w800,
+                                    color: _blanco, letterSpacing: 0.3)),
+                            ],
+                          ),
               ),
             ),
           ),

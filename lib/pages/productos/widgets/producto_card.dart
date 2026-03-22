@@ -64,6 +64,7 @@ class ProductoCard extends StatelessWidget {
         fit: BoxFit.cover,
         width: size,
         height: size,
+        cacheWidth: 200,
         loadingBuilder: (context, child, loadingProgress) {
           if (loadingProgress == null) return child;
           return Center(
@@ -166,36 +167,39 @@ class ProductoCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 // Badge stock (toca para editar)
-                GestureDetector(
-                  onTap: () => StockDialog.mostrar(
-                    context,
-                    producto: producto,
-                    servicio: servicio,
-                  ),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: _colorStock(stock).withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                      border:
-                          Border.all(color: _colorStock(stock)),
+                Tooltip(
+                  message: 'Actualizar stock',
+                  child: GestureDetector(
+                    onTap: () => StockDialog.mostrar(
+                      context,
+                      producto: producto,
+                      servicio: servicio,
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.inventory_2,
-                            size: 11, color: _colorStock(stock)),
-                        const SizedBox(width: 4),
-                        Text(
-                          _textoStock(stock),
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: _colorStock(stock),
-                            fontWeight: FontWeight.w600,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: _colorStock(stock).withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(12),
+                        border:
+                            Border.all(color: _colorStock(stock)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.inventory_2,
+                              size: 11, color: _colorStock(stock)),
+                          const SizedBox(width: 4),
+                          Text(
+                            _textoStock(stock),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: _colorStock(stock),
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -205,6 +209,7 @@ class ProductoCard extends StatelessWidget {
         ),
         // Menú de tres puntos
         trailing: PopupMenuButton(
+          tooltip: 'Opciones',
           icon: const Icon(Icons.more_vert),
           itemBuilder: (_) => [
             PopupMenuItem(

@@ -75,6 +75,14 @@ class _StockCardState extends State<StockCard> {
               ((p['precio'] ?? p['precioVenta'] as num?)?.toDouble() ?? 0),
         );
 
+        final valorInventarioProveedor = todos.fold<double>(
+          0.0,
+          (s, p) =>
+              s +
+              ((p['stock'] as num?)?.toDouble() ?? 0) *
+              ((p['precioProveedor'] as num?)?.toDouble() ?? 0),
+        );
+
         return Card(
           elevation: 0,
           color: Colors.white,
@@ -116,30 +124,64 @@ class _StockCardState extends State<StockCard> {
                                 fontWeight: FontWeight.w500)),
                       ]),
                     ]),
-                    // Badge valor inventario
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(colors: [
-                          _kColor.withOpacity(0.15),
-                          _kColor.withOpacity(0.05),
-                        ]),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: _kColor.withOpacity(0.2)),
-                      ),
-                      child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        const Icon(Icons.monetization_on_rounded,
-                            color: _kColor, size: 15),
-                        const SizedBox(width: 6),
-                        Text(
-                          '\$ ${NumberFormat('#,##0', 'es_CO').format(valorInventario.round())}',
-                          style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: _kColor),
+                    // Badge valor inventario (precio venta)
+                    Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(colors: [
+                            _kColor.withOpacity(0.15),
+                            _kColor.withOpacity(0.05),
+                          ]),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: _kColor.withOpacity(0.2)),
                         ),
-                      ]),
-                    ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.monetization_on_rounded,
+                              color: _kColor, size: 15),
+                          const SizedBox(width: 6),
+                          Text(
+                            '\$ ${NumberFormat('#,##0', 'es_CO').format(valorInventario.round())}',
+                            style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: _kColor),
+                          ),
+                        ]),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(colors: [
+                            const Color(0xFFE65100).withOpacity(0.15),
+                            const Color(0xFFE65100).withOpacity(0.05),
+                          ]),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: const Color(0xFFE65100).withOpacity(0.2)),
+                        ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.local_shipping_rounded,
+                              color: Color(0xFFE65100), size: 15),
+                          const SizedBox(width: 6),
+                          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(
+                              '\$ ${NumberFormat('#,##0', 'es_CO').format(valorInventarioProveedor.round())}',
+                              style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFFE65100)),
+                            ),
+                            Text(
+                              'Precio inv. proveedor',
+                              style: TextStyle(
+                                  fontSize: 9,
+                                  color: Colors.grey[500]),
+                            ),
+                          ]),
+                        ]),
+                      ),
+                    ]),
                   ],
                 ),
                 const SizedBox(height: 20),

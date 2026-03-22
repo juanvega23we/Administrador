@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -13,7 +14,7 @@ import 'widgets/chart_card.dart';
 import 'widgets/ingresos_card.dart';
 import 'widgets/productos_mas_vendidos.dart';
 import 'widgets/reportes_header.dart';
-import 'widgets/stock_card.dart';
+import 'widgets/section_banners.dart';
 import '../../../widgets/notificacion_personalizada.dart';
 
 const _kExcelFunctionUrl =
@@ -21,7 +22,6 @@ const _kExcelFunctionUrl =
 
 const _kColor     = Color(0xFF00897B);
 const _kColorDark = Color(0xFF004D40);
-
 const _kStockMinDefault = 10;
 
 class ReportesPage extends StatefulWidget {
@@ -42,26 +42,96 @@ class _ReportesPageState extends State<ReportesPage> {
   bool   _loadingProds = false;
   String _ultimosIds   = '';
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // FIX BUG-04: Límite de pedidos para el cálculo de top productos.
-  // Antes: se cargaban TODOS los detalles en memoria del dispositivo.
-  //        Con 1000+ pedidos podía consumir toda la RAM y colgar la app.
-  // Ahora: se toman solo los últimos _kMaxPedidosTopProductos pedidos
-  //        para el cálculo, lo que mantiene el tiempo de carga y la memoria
-  //        bajo control sin afectar la utilidad del dato (los más recientes
-  //        son los más relevantes para el ranking de productos).
-  // ─────────────────────────────────────────────────────────────────────────
+  bool _topProductosPendiente      = false;
+  bool _recalculandoTotales        = false;
+
   static const int _kMaxPedidosTopProductos = 200;
 
+  /// Corrige en Firestore el `total` de pedidos con reenvío entregado
+  /// que aún no tienen los campos `totalPrimeraEntrega` / `totalReenvio`.
+  /// Esto resuelve pedidos creados antes de la corrección del bug.
+  Future<void> _recalcularTotalesReenvio(List<Map<String, dynamic>> pedidos) async {
+    if (_recalculandoTotales) return;
+    _recalculandoTotales = true;
+
+    try {
+      final db = FirebaseFirestore.instance;
+
+      final pendientes = pedidos.where((p) =>
+          p['esReenvio']           == true &&
+          p['estado']              == 'entregado' &&
+          p['totalPrimeraEntrega'] == null,
+      ).toList();
+
+      for (final p in pendientes) {
+        // El docId del pedido viene en __docId (inyectado en el StreamBuilder)
+        final docId = p['__docId']?.toString() ?? '';
+        if (docId.isEmpty) continue;
+
+        try {
+          final detalleSnap = await db
+              .collection('detalle_pedido')
+              .where('idPedido', isEqualTo: docId)
+              .get();
+
+          double subtotalEntrega = 0;
+          double subtotalReenvio = 0;
+
+          for (final doc in detalleSnap.docs) {
+            final d      = doc.data();
+            final precio = (d['precioUnitario'] as num?)?.toDouble() ?? 0.0;
+
+            if (d['yaEntregado'] == true) {
+              final cant = (d['cantidad'] as num?)?.toInt() ?? 0;
+              subtotalEntrega += precio * cant;
+            } else if (d['esProductoReenvio'] == true) {
+              final cantReenv = (d['cantidadReenviada'] as num?)?.toInt() ?? 0;
+              final cant      = cantReenv > 0 ? cantReenv : ((d['cantidad'] as num?)?.toInt() ?? 0);
+              subtotalReenvio += precio * cant;
+            } else {
+              final cantDev   = (d['cantidadDevuelta']  as num?)?.toInt() ?? 0;
+              final cantReenv = (d['cantidadReenviada'] as num?)?.toInt() ?? 0;
+              if (cantDev > 0) {
+                final cantOriginal  = (d['cantidadOriginal'] as num?)?.toInt() ?? 0;
+                final cantEntregada = cantOriginal - cantDev;
+                if (cantEntregada > 0) subtotalEntrega += precio * cantEntregada;
+                if (cantReenv     > 0) subtotalReenvio += precio * cantReenv;
+              }
+            }
+          }
+
+          if (subtotalEntrega > 0 || subtotalReenvio > 0) {
+            final totalFinal = subtotalEntrega + subtotalReenvio;
+            await db.collection('pedido').doc(docId).update({
+              'total'               : totalFinal,
+              'totalPrimeraEntrega' : subtotalEntrega,
+              'totalReenvio'        : subtotalReenvio,
+            });
+          }
+        } catch (_) {
+          // Si falla un pedido individual, continuar con los demás
+        }
+      }
+    } finally {
+      _recalculandoTotales = false;
+    }
+  }
+
+  dynamic _sanitizarParaJson(dynamic valor) {
+    if (valor is Timestamp) return valor.toDate().toIso8601String();
+    if (valor is Map) return valor.map((k, v) => MapEntry(k.toString(), _sanitizarParaJson(v)));
+    if (valor is List) return valor.map((e) => _sanitizarParaJson(e)).toList();
+    return valor;
+  }
+
   Future<void> _cargarTopProductos(List<Map<String, dynamic>> pedidos) async {
-    // CORRECCIÓN BUG-04: limitar a los últimos N pedidos antes de consultar
     final pedidosLimitados = pedidos.length > _kMaxPedidosTopProductos
         ? pedidos.take(_kMaxPedidosTopProductos).toList()
         : pedidos;
 
     final ids = pedidosLimitados
-        .where((p) => p['estado'] == 'confirmado' || p['estado'] == 'entregado')
-        .map((p) => p['idPedido']?.toString() ?? '')
+        .where((p) => p['estado'] == 'entregado')
+        .map((p) => (p['__docId'] ?? p['idPedido'])?.toString() ?? '')
         .where((id) => id.isNotEmpty)
         .toSet()
         .toList();
@@ -92,14 +162,46 @@ class _ReportesPageState extends State<ReportesPage> {
           final d      = doc.data();
           final id     = (d['idProducto'] ?? doc.id).toString();
           final nombre = (d['nombreProducto'] ?? 'Sin nombre').toString();
-          final cant   = (d['cantidad']  as num?)?.toInt()    ?? 0;
-          final sub    = (d['subtotal']  as num?)?.toDouble() ?? 0.0;
+          final precio = (d['precioUnitario'] as num?)?.toDouble() ?? 0.0;
+
+          // Ignorar productos omitidos por falta de stock
+          if (d['omitido'] == true && d['yaEntregado'] != true) continue;
+          // Ignorar productos totalmente devueltos sin reenvío
+          if (d['devuelto'] == true && (d['cantidadDevuelta'] as num?)?.toInt() == 0) continue;
+
+          int cantReal = 0;
+
+          if (d['yaEntregado'] == true) {
+            // Primera entrega normal
+            cantReal = (d['cantidad'] as num?)?.toInt() ?? 0;
+          } else if (d['esProductoReenvio'] == true) {
+            // Producto nuevo del reenvío
+            final cantReenv = (d['cantidadReenviada'] as num?)?.toInt() ?? 0;
+            cantReal = cantReenv > 0 ? cantReenv : ((d['cantidad'] as num?)?.toInt() ?? 0);
+          } else {
+            final cantDev   = (d['cantidadDevuelta']  as num?)?.toInt() ?? 0;
+            final cantReenv = (d['cantidadReenviada'] as num?)?.toInt() ?? 0;
+            if (cantDev > 0) {
+              // Devolución parcial: contar entregado + reenviado
+              final cantOriginal  = (d['cantidadOriginal'] as num?)?.toInt() ??
+                                    ((d['cantidad'] as num?)?.toInt() ?? 0);
+              final cantEntregada = cantOriginal - cantDev;
+              cantReal = cantEntregada + cantReenv;
+            } else {
+              // Producto normal entregado
+              cantReal = (d['cantidad'] as num?)?.toInt() ?? 0;
+            }
+          }
+
+          if (cantReal <= 0) continue;
+
+          final sub = precio * cantReal;
 
           if (prodMap.containsKey(id)) {
-            prodMap[id]!['cantidad'] = (prodMap[id]!['cantidad'] as int)    + cant;
+            prodMap[id]!['cantidad'] = (prodMap[id]!['cantidad'] as int)    + cantReal;
             prodMap[id]!['ingresos'] = (prodMap[id]!['ingresos'] as double) + sub;
           } else {
-            prodMap[id] = {'nombre': nombre, 'cantidad': cant, 'ingresos': sub};
+            prodMap[id] = {'nombre': nombre, 'cantidad': cantReal, 'ingresos': sub};
           }
         }
       }
@@ -116,7 +218,6 @@ class _ReportesPageState extends State<ReportesPage> {
     }
   }
 
-  // ── FIX 1: fechaInicioEfectiva sin cambios + nuevo fechaFinEfectiva ──
   DateTime get _fechaInicioEfectiva {
     if (_periodo == 'custom' && _fechaInicio != null) return _fechaInicio!;
     final ahora = DateTime.now();
@@ -127,18 +228,19 @@ class _ReportesPageState extends State<ReportesPage> {
     }
   }
 
-  // Cuando solo hay fechaInicio, el fin es ese mismo día (filtro de un solo día)
   DateTime? get _fechaFinEfectiva {
     if (_periodo != 'custom') return null;
-    if (_fechaFin != null) return _fechaFin;
-    if (_fechaInicio != null) return _fechaInicio; // mismo día como fin
+    if (_fechaFin != null)    return _fechaFin;
+    if (_fechaInicio != null) return _fechaInicio;
     return null;
   }
 
   void _cambiarPeriodo(String nuevo) {
     setState(() {
-      _periodo = nuevo; _fechaInicio = null;
-      _fechaFin = null; _ultimosIds = '';
+      _periodo = nuevo;
+      _fechaInicio = null;
+      _fechaFin    = null;
+      _ultimosIds  = '';
     });
   }
 
@@ -148,11 +250,13 @@ class _ReportesPageState extends State<ReportesPage> {
       return snap.docs.map((d) {
         final raw = d.data();
         return {
-          'nombre':      (raw['nombre'] ?? raw['name'] ?? '—').toString(),
-          'categoria':   (raw['categoria'] ?? '—').toString(),
-          'stock':       (raw['stock']       as num?)?.toInt()    ?? 0,
-          'stockMinimo': (raw['stockMinimo'] as num?)?.toInt()    ?? _kStockMinDefault,
-          'precio':      (raw['precio'] ?? raw['precioVenta'] as num?)?.toDouble() ?? 0.0,
+          'nombre':          (raw['nombre'] ?? raw['name'] ?? '—').toString(),
+          'categoria':       (raw['categoria'] ?? '—').toString(),
+          'stock':           (raw['stock']           as num?)?.toInt()    ?? 0,
+          'stockMinimo':     (raw['stockMinimo']     as num?)?.toInt()    ?? _kStockMinDefault,
+          'precio':          (raw['precio'] ?? raw['precioVenta'] as num?)?.toDouble() ?? 0.0,
+          'precioProveedor': (raw['precioProveedor'] as num?)?.toDouble() ?? 0.0,
+          'codigo':          (raw['codigo'] ?? '—').toString(),
         };
       }).toList();
     } catch (e) {
@@ -161,6 +265,77 @@ class _ReportesPageState extends State<ReportesPage> {
     }
   }
 
+  /// Carga devoluciones del período activo desde Firestore
+  Future<List<Map<String, dynamic>>> _fetchDevoluciones() async {
+    try {
+      final inicio = Timestamp.fromDate(_fechaInicioEfectiva);
+
+      Query<Map<String, dynamic>> query = FirebaseFirestore.instance
+          .collection('devolucion')
+          .where('fechaSolicitud', isGreaterThanOrEqualTo: inicio)
+          .orderBy('fechaSolicitud', descending: true);
+
+      if (_periodo == 'custom' && _fechaFinEfectiva != null) {
+        final fin = DateTime(_fechaFinEfectiva!.year, _fechaFinEfectiva!.month,
+            _fechaFinEfectiva!.day, 23, 59, 59);
+        query = query.where('fechaSolicitud',
+            isLessThanOrEqualTo: Timestamp.fromDate(fin));
+      }
+
+      final snap = await query.get();
+      return snap.docs.map((d) => d.data()).toList();
+    } catch (e) {
+      debugPrint('Error cargando devoluciones: $e');
+      return [];
+    }
+  }
+
+  String _labelMotivoDevPdf(dynamic productosDevueltos) {
+    if (productosDevueltos is! List || productosDevueltos.isEmpty) return '—';
+    final motivos = (productosDevueltos as List)
+        .map((p) => _traducirMotivo(p['motivo']?.toString() ?? ''))
+        .toSet()
+        .join(', ');
+    return motivos.isEmpty ? '—' : motivos;
+  }
+
+  String _resumenProductosDevPdf(dynamic productosDevueltos) {
+    if (productosDevueltos is! List || productosDevueltos.isEmpty) return '—';
+    return (productosDevueltos as List).map((p) {
+      final nombre = p['nombre']?.toString() ?? '?';
+      final cant   = p['cantidad']?.toString() ?? '0';
+      return '$cant× $nombre';
+    }).join('\n');
+  }
+
+  String _traducirMotivo(String motivo) {
+    switch (motivo) {
+      case 'defectuoso':          return 'Defectuoso';
+      case 'equivocado':          return 'Equivocado';
+      case 'cantidad_incorrecta': return 'Cant. incorrecta';
+      case 'insatisfecho':        return 'Insatisfecho';
+      case 'otro':                return 'Otro';
+      default: return motivo.isNotEmpty ? motivo : '—';
+    }
+  }
+
+  pw.Widget _pdfDevKpi(String label, String value, PdfColor color, PdfColor bg) {
+    return pw.Expanded(
+      child: pw.Container(
+        padding: const pw.EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+        decoration: pw.BoxDecoration(
+          color: bg,
+          borderRadius: pw.BorderRadius.circular(8),
+          border: pw.Border.all(color: color, width: 0.5),
+        ),
+        child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+          pw.Text(label, style: pw.TextStyle(fontSize: 8, color: color)),
+          pw.SizedBox(height: 3),
+          pw.Text(value, style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: color)),
+        ]),
+      ),
+    );
+  }
   Future<void> _exportarExcel() async {
     if (_pedidosCache.isEmpty) {
       _snack('No hay datos para exportar', TipoNotificacion.advertencia);
@@ -169,28 +344,37 @@ class _ReportesPageState extends State<ReportesPage> {
     setState(() => _exportandoExcel = true);
     try {
       final pedidosJson = _pedidosCache.map((p) {
-        final map = Map<String, dynamic>.from(p);
-        for (final key in map.keys.toList()) {
-          if (map[key] is Timestamp) {
-            map[key] = (map[key] as Timestamp).toDate().toIso8601String();
-          }
+        final sanitized = _sanitizarParaJson(p) as Map<String, dynamic>;
+        if (sanitized['nombreCliente'] == null && sanitized['cliente'] is Map) {
+          sanitized['nombreCliente'] =
+              (sanitized['cliente'] as Map)['nombre']?.toString() ?? '—';
         }
-        if (map['nombreCliente'] == null && map['cliente'] is Map) {
-          map['nombreCliente'] = (map['cliente'] as Map)['nombre']?.toString() ?? '—';
-        }
-        return map;
+        return sanitized;
       }).toList();
 
-      final productosJson = await _fetchProductos();
-      debugPrint('Productos a enviar al Excel: ${productosJson.length}');
+      final productosJson    = await _fetchProductos();
+      final devolucionesJson = await _fetchDevoluciones();
+
+      // Preparar devoluciones con campos legibles para el Excel
+      final devolucionesParaExcel = devolucionesJson.map((d) {
+        final sanitized = _sanitizarParaJson(d) as Map<String, dynamic>;
+        sanitized['resolucionLabel'] =
+            d['resolucion'] == 'reenvio'   ? 'Reenvío'   :
+            d['resolucion'] == 'reembolso' ? 'Reembolso' :
+            d['resolucion']?.toString() ?? '—';
+        sanitized['motivoLabel']      = _labelMotivoDevPdf(d['productosDevueltos']);
+        sanitized['productosResumen'] = _resumenProductosDevPdf(d['productosDevueltos']);
+        return sanitized;
+      }).toList();
 
       final response = await http.post(
         Uri.parse(_kExcelFunctionUrl),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'pedidos':   pedidosJson,
-          'productos': productosJson,
-          'periodo':   _etiquetaPeriodo(),
+          'pedidos':      pedidosJson,
+          'productos':    productosJson,
+          'devoluciones': devolucionesParaExcel,
+          'periodo':      _etiquetaPeriodo(),
         }),
       );
       if (response.statusCode != 200) throw Exception('Error: ${response.statusCode}');
@@ -207,14 +391,123 @@ class _ReportesPageState extends State<ReportesPage> {
     }
   }
 
-  Future<void> _exportarPdf() async {
-    if (_pedidosCache.isEmpty) {
+  // ── Modal selector PDF ────────────────────────────────────────
+  Future<void> _mostrarOpcionesPdf() async {
+    bool incluyePedidos   = true;
+    bool incluyeProductos = true;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) {
+          const color = Color(0xFFE53935);
+          final puedeExportar = incluyePedidos || incluyeProductos;
+
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            titlePadding: const EdgeInsets.fromLTRB(24, 20, 16, 0),
+            title: Row(children: [
+              const Icon(Icons.picture_as_pdf_rounded, color: color, size: 22),
+              const SizedBox(width: 10),
+              const Text('Exportar PDF',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: color)),
+            ]),
+            content: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Text('Selecciona qué secciones incluir:',
+                  style: TextStyle(fontSize: 13, color: Colors.black54)),
+              const SizedBox(height: 12),
+              _checkTile(
+                label: 'Pedidos', subtitle: 'Detalle y distribución de pedidos',
+                icon: Icons.receipt_long_rounded, value: incluyePedidos, color: color,
+                onChanged: (v) => setDlg(() => incluyePedidos = v!),
+              ),
+              const SizedBox(height: 8),
+              _checkTile(
+                label: 'Productos / Stock', subtitle: 'Inventario y estado de stock',
+                icon: Icons.inventory_2_rounded, value: incluyeProductos, color: color,
+                onChanged: (v) => setDlg(() => incluyeProductos = v!),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.select_all_rounded, size: 18),
+                  label: const Text('Seleccionar todo'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: color, side: const BorderSide(color: color),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                  ),
+                  onPressed: () => setDlg(() {
+                    incluyePedidos = true; incluyeProductos = true;
+                  }),
+                ),
+              ),
+            ]),
+            actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancelar', style: TextStyle(color: Colors.black45)),
+              ),
+              ElevatedButton(
+                onPressed: !puedeExportar ? null : () {
+                  Navigator.pop(ctx);
+                  _exportarPdf(conPedidos: incluyePedidos, conProductos: incluyeProductos);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: color, foregroundColor: Colors.white,
+                  disabledBackgroundColor: Colors.grey.shade300,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                ),
+                child: const Text('Exportar'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _checkTile({
+    required String label, required String subtitle, required IconData icon,
+    required bool value, required Color color, required ValueChanged<bool?> onChanged,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: value ? color.withOpacity(0.06) : Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: value ? color.withOpacity(0.4) : Colors.grey.shade200),
+      ),
+      child: CheckboxListTile(
+        value: value, onChanged: onChanged, activeColor: color,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        title: Row(children: [
+          Icon(icon, size: 16, color: value ? color : Colors.grey),
+          const SizedBox(width: 8),
+          Text(label, style: TextStyle(
+              fontSize: 14, fontWeight: FontWeight.w600,
+              color: value ? color : Colors.black87)),
+        ]),
+        subtitle: Text(subtitle, style: const TextStyle(fontSize: 11, color: Colors.black45)),
+      ),
+    );
+  }
+
+  // ── PDF ───────────────────────────────────────────────────────
+  Future<void> _exportarPdf({
+    bool conPedidos   = true,
+    bool conProductos = true,
+  }) async {
+    if (_pedidosCache.isEmpty && conPedidos) {
       _snack('No hay datos para exportar', TipoNotificacion.advertencia);
       return;
     }
     setState(() => _exportandoPdf = true);
     try {
-      final productos = await _fetchProductos();
+      final productos   = conProductos ? await _fetchProductos() : <Map<String, dynamic>>[];
+      final devoluciones = await _fetchDevoluciones();
 
       final doc       = pw.Document(title: 'Reporte Granero del Norte', author: 'Sistema Admin');
       final verde     = PdfColor.fromHex('00897B');
@@ -224,178 +517,480 @@ class _ReportesPageState extends State<ReportesPage> {
       final amarillo  = PdfColor.fromHex('FFF9C4');
       final rojo2     = PdfColor.fromHex('FFEBEE');
       final verde2    = PdfColor.fromHex('E8F5E9');
+      // Colores tabla comparativa — ya no se usan, se usa gris/white uniforme
 
-      final total      = _pedidosCache.length;
-      final pendientes = _pedidosCache.where((p) => p['estado'] == 'pendiente').length;
-      final confirmados= _pedidosCache.where((p) => p['estado'] == 'confirmado').length;
-      final entregados = _pedidosCache.where((p) => p['estado'] == 'entregado').length;
-      final cancelados = _pedidosCache.where((p) => p['estado'] == 'cancelado').length;
-      final ingresos   = _pedidosCache
-          .where((p) => p['estado'] == 'entregado' || p['estado'] == 'confirmado')
-          .fold(0.0, (s, p) => s + ((p['total'] as num?) ?? 0.0));
+      final total       = _pedidosCache.length;
+      final pendientes  = _pedidosCache.where((p) => p['estado'] == 'pendiente').length;
+      final confirmados = _pedidosCache.where((p) => p['estado'] == 'confirmado').length;
+      final despachados = _pedidosCache.where((p) => p['estado'] == 'despachado').length;
+      final entregados  = _pedidosCache.where((p) => p['estado'] == 'entregado').length;
+      final cancelados  = _pedidosCache.where((p) => p['estado'] == 'cancelado').length;
+
+      // ── CORRECCIÓN: dos totales distintos ──────────────────
+      // totalVentas  = solo entregados  → dinero real cobrado
+      // totalPedidos = TODOS los estados → volumen bruto
+      final totalVentas  = _ingresosEstado('entregado');
+      final totalPedidos = _pedidosCache.fold(0.0, (s, p) => s + _totalRealPedido(p));
 
       String estadoStock(Map p) {
         final s = (p['stock'] as num?)?.toInt() ?? 0;
         final m = (p['stockMinimo'] as num?)?.toInt() ?? _kStockMinDefault;
-        if (s <= 0)  return 'sinStock';
-        if (s <= m)  return 'bajo';
+        if (s <= 0) return 'sinStock';
+        if (s <= m) return 'bajo';
         return 'optimo';
       }
 
       final sinStockN = productos.where((p) => estadoStock(p) == 'sinStock').length;
       final bajosN    = productos.where((p) => estadoStock(p) == 'bajo').length;
       final okN       = productos.length - sinStockN - bajosN;
-      final valorInv  = productos.fold<double>(0.0, (s, p) =>
+
+      final valorInv = productos.fold<double>(0.0, (s, p) =>
           s + ((p['stock'] as num?)?.toDouble() ?? 0) *
               ((p['precio'] as num?)?.toDouble() ?? 0));
+      final valorInvProv = productos.fold<double>(0.0, (s, p) =>
+          s + ((p['stock'] as num?)?.toDouble() ?? 0) *
+              ((p['precioProveedor'] as num?)?.toDouble() ?? 0));
+      final gananciaPotencial = valorInv - valorInvProv;
+      final pctGanTotal = valorInv > 0 ? (gananciaPotencial / valorInv * 100) : 0.0;
+
+      String fmtInv(double n) => '\$ ${NumberFormat('#,##0', 'es_CO').format(n.round())}';
+
+      // ── Widget tabla comparativa reutilizable ───────────────
+      List<pw.Widget> tablaComparativa() {
+        final diferencia   = totalPedidos - totalVentas;
+        final pctCobrado   = totalPedidos > 0 ? (totalVentas / totalPedidos * 100) : 0.0;
+        final pctNoCobrado = 100.0 - pctCobrado;
+        final noEntregados = total - entregados;
+
+        pw.Widget compCell(String text, {
+          PdfColor? bg, PdfColor? fg, bool bold = false, double size = 8,
+        }) => pw.Container(
+          color: bg,
+          padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+          child: pw.Text(text, style: pw.TextStyle(
+            fontSize: size, color: fg, fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal,
+          )),
+        );
+
+        return [
+          pw.Text('TOTAL PEDIDOS vs TOTAL VENTAS COBRADAS',
+              style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: verde)),
+          pw.SizedBox(height: 6),
+          pw.Table(
+            border: pw.TableBorder.all(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+            columnWidths: {
+              0: const pw.FlexColumnWidth(3.0),
+              1: const pw.FlexColumnWidth(2.2),
+              2: const pw.FlexColumnWidth(1.2),
+              3: const pw.FlexColumnWidth(1.5),
+              4: const pw.FlexColumnWidth(3.5),
+            },
+            children: [
+              // Encabezado
+              pw.TableRow(
+                decoration: pw.BoxDecoration(color: verdeOsc),
+                children: [
+                  _pdfTh('Concepto'), _pdfTh('Valor'),
+                  _pdfTh('Pedidos'), _pdfTh('% del Total'), _pdfTh('Notas'),
+                ],
+              ),
+              // Fila 1 — todos los pedidos (gris)
+              pw.TableRow(decoration: pw.BoxDecoration(color: gris), children: [
+                compCell('Total pedidos del período'),
+                compCell(fmtInv(totalPedidos)),
+                compCell('$total'),
+                compCell('100%'),
+                compCell('Suma de TODOS los pedidos (cualquier estado)', fg: grisTexto, size: 7),
+              ]),
+              // Fila 2 — solo entregados (blanco)
+              pw.TableRow(children: [
+                compCell('Ventas cobradas (entregados)'),
+                compCell(fmtInv(totalVentas)),
+                compCell('$entregados'),
+                compCell('${pctCobrado.toStringAsFixed(1)}%'),
+                compCell('Solo pedidos con estado "entregado"', fg: grisTexto, size: 7),
+              ]),
+              // Fila 3 — diferencia (gris)
+              pw.TableRow(decoration: pw.BoxDecoration(color: gris), children: [
+                compCell('En curso / aún no cobrado'),
+                compCell(fmtInv(diferencia)),
+                compCell('$noEntregados'),
+                compCell('${pctNoCobrado.toStringAsFixed(1)}%'),
+                compCell('Pendiente + Confirmado + Despachado + Cancelado', fg: grisTexto, size: 7),
+              ]),
+              // Fila total — cobertura
+              pw.TableRow(
+                decoration: pw.BoxDecoration(color: verdeOsc),
+                children: [
+                  _pdfTh('COBERTURA DE COBRO'),
+                  pw.Padding(
+                    padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                    child: pw.Text('${pctCobrado.toStringAsFixed(1)}% cobrado',
+                        style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold,
+                            color: PdfColor.fromHex('F39C12'))),
+                  ),
+                  pw.Padding(
+                    padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                    child: pw.Text('$entregados de $total',
+                        style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold,
+                            color: PdfColors.white)),
+                  ),
+                  pw.Container(color: verdeOsc),
+                  pw.Container(color: verdeOsc),
+                ],
+              ),
+            ],
+          ),
+          pw.SizedBox(height: 5),
+          pw.Text(
+            'ℹ  "Total pedidos" incluye todos los estados. "Ventas cobradas" = solo entregados = dinero efectivamente cobrado.',
+            style: pw.TextStyle(fontSize: 7, color: grisTexto, fontStyle: pw.FontStyle.italic),
+          ),
+          pw.SizedBox(height: 20),
+        ];
+      }
 
       doc.addPage(pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(32),
-        header: (ctx) => pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-          pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-              pw.Text('GRANERO DEL NORTE',
-                  style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold, color: verde)),
-              pw.Text('Reporte de Ventas y Pedidos',
-                  style: pw.TextStyle(fontSize: 11, color: grisTexto)),
+        maxPages: 200,
+        margin: const pw.EdgeInsets.fromLTRB(32, 32, 32, 48),
+        header: (ctx) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+              pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                pw.Text('GRANERO DEL NORTE',
+                    style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold, color: verde)),
+                pw.Text('Reporte de Ventas y Pedidos',
+                    style: pw.TextStyle(fontSize: 11, color: grisTexto)),
+              ]),
+              pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
+                pw.Text('Periodo: ${_etiquetaPeriodo()}',
+                    style: pw.TextStyle(fontSize: 10, color: grisTexto)),
+                pw.Text('Generado: ${DateFormat("dd/MM/yyyy HH:mm").format(DateTime.now())}',
+                    style: pw.TextStyle(fontSize: 10, color: grisTexto)),
+              ]),
             ]),
-            pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-              pw.Text('Periodo: ${_etiquetaPeriodo()}',
-                  style: pw.TextStyle(fontSize: 10, color: grisTexto)),
-              pw.Text('Generado: ${DateFormat('dd/MM/yyyy HH:mm').format(DateTime.now())}',
-                  style: pw.TextStyle(fontSize: 10, color: grisTexto)),
-            ]),
-          ]),
-          pw.Divider(color: verde, thickness: 2),
-          pw.SizedBox(height: 4),
-        ]),
-        footer: (ctx) => pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-          pw.Text('Granero del Norte — Reporte confidencial',
-              style: pw.TextStyle(fontSize: 8, color: grisTexto)),
-          pw.Text('Pagina ${ctx.pageNumber} de ${ctx.pagesCount}',
-              style: pw.TextStyle(fontSize: 8, color: grisTexto)),
-        ]),
+            pw.Divider(color: verde, thickness: 2),
+            pw.SizedBox(height: 4),
+          ],
+        ),
+        footer: (ctx) => pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Text('Pagina ${ctx.pageNumber} de ${ctx.pagesCount}',
+                style: pw.TextStyle(fontSize: 8, color: grisTexto)),
+          ],
+        ),
         build: (ctx) => [
-          pw.Text('DISTRIBUCION POR ESTADO',
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: verde)),
-          pw.SizedBox(height: 8),
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
-            children: [
-              pw.TableRow(decoration: pw.BoxDecoration(color: verdeOsc),
-                  children: [_pdfTh('Estado'), _pdfTh('Cantidad'), _pdfTh('% del Total'), _pdfTh('Ingresos')]),
-              _pdfEstadoRow('Pendiente',  pendientes,  total, null,  gris),
-              _pdfEstadoRow('Confirmado', confirmados, total, _ingresosEstado('confirmado'), PdfColors.white),
-              _pdfEstadoRow('Entregado',  entregados,  total, _ingresosEstado('entregado'),  gris),
-              _pdfEstadoRow('Cancelado',  cancelados,  total, null,  PdfColors.white),
-            ],
-          ),
-          pw.SizedBox(height: 20),
 
-          pw.Text('DETALLE DE PEDIDOS ($total)',
-              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: verde)),
-          pw.SizedBox(height: 8),
-          pw.Table(
-            columnWidths: {
-              0: const pw.FlexColumnWidth(2), 1: const pw.FlexColumnWidth(3),
-              2: const pw.FlexColumnWidth(2), 3: const pw.FlexColumnWidth(2),
-              4: const pw.FlexColumnWidth(3),
-            },
-            border: pw.TableBorder.all(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
-            children: [
-              pw.TableRow(decoration: pw.BoxDecoration(color: verdeOsc),
-                  children: [_pdfTh('N Pedido'), _pdfTh('Cliente'), _pdfTh('Estado'), _pdfTh('Total'), _pdfTh('Fecha')]),
-              ..._pedidosCache.asMap().entries.map((e) {
-                final p  = e.value;
-                final bg = e.key.isEven ? gris : PdfColors.white;
-                return pw.TableRow(decoration: pw.BoxDecoration(color: bg), children: [
-                  _pdfTd(p['numeroPedido']?.toString() ?? p['idPedido']?.toString() ?? '—'),
-                  _pdfTd(_getNombreCliente(p)),
-                  _pdfTd(_nombreEstado(p['estado']?.toString())),
-                  _pdfTd('\$ ${_formatPrecioColombia(((p['total'] as num?) ?? 0.0).toDouble())}'),
-                  _pdfTd(_formatFechaStr(p['fechaPedido'] ?? p['creadoEn'])),
-                ]);
-              }),
-            ],
-          ),
-          pw.SizedBox(height: 24),
-
-          if (productos.isNotEmpty) ...[
-            pw.Divider(color: verde, thickness: 1),
-            pw.SizedBox(height: 12),
-            pw.Text('STOCK DE PRODUCTOS',
+          // ── SECCIÓN PEDIDOS ──────────────────────────────────
+          if (conPedidos) ...[
+            pw.Text('DISTRIBUCION POR ESTADO',
                 style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: verde)),
             pw.SizedBox(height: 8),
-            pw.Row(children: [
-              _pdfStockKpi('Total',      '${productos.length}',             PdfColors.grey100),
-              pw.SizedBox(width: 6),
-              _pdfStockKpi('Optimo',     '$okN',                            PdfColor.fromHex('E8F5E9')),
-              pw.SizedBox(width: 6),
-              _pdfStockKpi('Stock bajo', '$bajosN',                         PdfColor.fromHex('FFF9C4')),
-              pw.SizedBox(width: 6),
-              _pdfStockKpi('Sin stock',  '$sinStockN',                      PdfColor.fromHex('FFEBEE')),
-              pw.SizedBox(width: 6),
-              _pdfStockKpi('Valor inv.', '\$ ${_formatPrecioColombia(valorInv)}', PdfColors.grey100),
-            ]),
-            pw.SizedBox(height: 10),
             pw.Table(
-              columnWidths: {
-                0: const pw.FlexColumnWidth(3.5),
-                1: const pw.FlexColumnWidth(2),
-                2: const pw.FlexColumnWidth(1.5),
-                3: const pw.FlexColumnWidth(2),
-                4: const pw.FlexColumnWidth(2),
-              },
               border: pw.TableBorder.all(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
               children: [
                 pw.TableRow(
                   decoration: pw.BoxDecoration(color: verdeOsc),
                   children: [
-                    _pdfTh('Producto'), _pdfTh('Categoría'),
-                    _pdfTh('Stock'),    _pdfTh('Estado'),
-                    _pdfTh('Precio'),
+                    _pdfTh('Estado'), _pdfTh('Cantidad'),
+                    _pdfTh('% del Total'), _pdfTh('Ventas'),
                   ],
                 ),
-                ...(() {
-                  final sorted = List<Map<String, dynamic>>.from(productos)
-                    ..sort((a, b) {
-                      int ord(Map p) {
-                        final e = estadoStock(p);
-                        if (e == 'sinStock') return 0;
-                        if (e == 'bajo')     return 1;
-                        return 2;
-                      }
-                      return ord(a).compareTo(ord(b));
-                    });
-                  return sorted.asMap().entries.map((e) {
-                    final p     = e.value;
-                    final stock = (p['stock'] as num?)?.toInt() ?? 0;
-                    final precio= (p['precio'] as num?)?.toDouble() ?? 0.0;
-                    final est   = estadoStock(p);
-                    PdfColor bg;
-                    String estadoTxt;
-                    if (est == 'sinStock')  { bg = rojo2;    estadoTxt = 'Sin stock';  }
-                    else if (est == 'bajo') { bg = amarillo; estadoTxt = 'Stock bajo'; }
-                    else                   { bg = verde2;    estadoTxt = 'Optimo';     }
-                    return pw.TableRow(decoration: pw.BoxDecoration(color: bg), children: [
+                _pdfEstadoRow('Pendiente',  pendientes,  total, null,          gris),
+                _pdfEstadoRow('Confirmado', confirmados, total, null,          PdfColors.white),
+                _pdfEstadoRow('Despachado', despachados, total, null,          gris),
+                _pdfEstadoRow('Entregado',  entregados,  total, totalVentas,   PdfColors.white),
+                _pdfEstadoRow('Cancelado',  cancelados,  total, null,          gris),
+                // CORRECCIÓN: total muestra totalPedidos (todos), no solo entregados
+                pw.TableRow(
+                  decoration: pw.BoxDecoration(color: verdeOsc),
+                  children: [
+                    _pdfTh('TOTAL GENERAL'),
+                    _pdfTh('$total'),
+                    _pdfTh('100%'),
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                      child: pw.Text(
+                        '\$ ${_formatPrecioColombia(totalPedidos)}',
+                        style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold,
+                            color: PdfColor.fromHex('F39C12')),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            pw.SizedBox(height: 20),
+
+            // ── TABLA COMPARATIVA (nueva) ──────────────────────
+            ...tablaComparativa(),
+
+            pw.Text('DETALLE DE PEDIDOS ($total)',
+                style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: verde)),
+            pw.SizedBox(height: 8),
+            pw.Table(
+              columnWidths: {
+                0: const pw.FlexColumnWidth(2), 1: const pw.FlexColumnWidth(3),
+                2: const pw.FlexColumnWidth(2), 3: const pw.FlexColumnWidth(2),
+                4: const pw.FlexColumnWidth(3),
+              },
+              children: [
+                pw.TableRow(
+                  decoration: pw.BoxDecoration(color: verdeOsc),
+                  children: [
+                    _pdfTh('N Pedido'), _pdfTh('Cliente'), _pdfTh('Estado'),
+                    _pdfTh('Total'), _pdfTh('Fecha'),
+                  ],
+                ),
+              ],
+            ),
+            ..._pedidosCache.asMap().entries.map((e) {
+              final p   = e.value;
+              final bg  = e.key.isEven ? gris : PdfColors.white;
+              final est = p['estado']?.toString() ?? '';
+              return pw.Table(
+                columnWidths: {
+                  0: const pw.FlexColumnWidth(2), 1: const pw.FlexColumnWidth(3),
+                  2: const pw.FlexColumnWidth(2), 3: const pw.FlexColumnWidth(2),
+                  4: const pw.FlexColumnWidth(3),
+                },
+                border: pw.TableBorder(
+                  left:   pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                  right:  pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                  bottom: pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                  verticalInside: pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                ),
+                children: [
+                  pw.TableRow(decoration: pw.BoxDecoration(color: bg), children: [
+                    _pdfTd(p['numeroPedido']?.toString() ?? p['idPedido']?.toString() ?? '—'),
+                    _pdfTd(_getNombreCliente(p)),
+                    _pdfTd(_nombreEstado(est)),
+                    // Cada pedido muestra su propio total (sin filtrar por estado)
+                    _pdfTd('\$ ${_formatPrecioColombia(((p['total'] as num?) ?? 0.0).toDouble())}'),
+                    _pdfTd(_formatFechaStr(p['fechaPedido'] ?? p['creadoEn'])),
+                  ]),
+                ],
+              );
+            }),
+            // CORRECCIÓN: total general = totalPedidos (todos los estados)
+            pw.Table(
+              columnWidths: {
+                0: const pw.FlexColumnWidth(2), 1: const pw.FlexColumnWidth(3),
+                2: const pw.FlexColumnWidth(2), 3: const pw.FlexColumnWidth(2),
+                4: const pw.FlexColumnWidth(3),
+              },
+              children: [
+                pw.TableRow(decoration: pw.BoxDecoration(color: verdeOsc), children: [
+                  _pdfTh('TOTAL GENERAL'), _pdfTh(''), _pdfTh(''),
+                  pw.Padding(
+                    padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                    child: pw.Text('\$ ${_formatPrecioColombia(totalPedidos)}',
+                        style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold,
+                            color: PdfColor.fromHex('F39C12'))),
+                  ),
+                  _pdfTh(''),
+                ]),
+              ],
+            ),
+            pw.SizedBox(height: 24),
+
+            // ── SECCIÓN DEVOLUCIONES ─────────────────────────
+            if (devoluciones.isNotEmpty) ...[ 
+              pw.Divider(color: verde, thickness: 1),
+              pw.SizedBox(height: 12),
+              pw.Text('DEVOLUCIONES DEL PERÍODO',
+                  style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: verde)),
+              pw.SizedBox(height: 10),
+              // KPIs rápidos
+              pw.Row(children: [
+                _pdfDevKpi('Total devoluciones', '${devoluciones.length}',
+                    verdeOsc, gris),
+                pw.SizedBox(width: 6),
+                _pdfDevKpi('Reenvíos',
+                    '${devoluciones.where((d) => d["resolucion"] == "reenvio").length}',
+                    verdeOsc, gris),
+                pw.SizedBox(width: 6),
+                _pdfDevKpi('Reembolsos',
+                    '${devoluciones.where((d) => d["resolucion"] == "reembolso").length}',
+                    verdeOsc, gris),
+                pw.SizedBox(width: 6),
+                _pdfDevKpi('Monto total devuelto',
+                    '\$ ${_formatPrecioColombia(devoluciones.fold(0.0, (s, d) => s + ((d["montoDevolucion"] as num?)?.toDouble() ?? 0.0)))}',
+                    verdeOsc, gris),
+              ]),
+              pw.SizedBox(height: 10),
+              // Tabla devoluciones
+              pw.Table(
+                columnWidths: {
+                  0: const pw.FlexColumnWidth(1.8),
+                  1: const pw.FlexColumnWidth(2.0),
+                  2: const pw.FlexColumnWidth(2.5),
+                  3: const pw.FlexColumnWidth(3.5),
+                  4: const pw.FlexColumnWidth(2.0),
+                  5: const pw.FlexColumnWidth(1.8),
+                  6: const pw.FlexColumnWidth(1.8),
+                },
+                children: [
+                  pw.TableRow(
+                    decoration: pw.BoxDecoration(color: verdeOsc),
+                    children: [
+                      _pdfTh('Fecha'),
+                      _pdfTh('N° Pedido'),
+                      _pdfTh('Cliente'),
+                      _pdfTh('Productos devueltos'),
+                      _pdfTh('Motivo'),
+                      _pdfTh('Resolución'),
+                      _pdfTh('Monto'),
+                    ],
+                  ),
+                ],
+              ),
+              ...devoluciones.asMap().entries.map((e) {
+                final d   = e.value;
+                final bg  = e.key.isEven ? gris : PdfColors.white;
+                final res = d['resolucion']?.toString() ?? '';
+                final resLabel = res == 'reenvio' ? 'Reenvío' : res == 'reembolso' ? 'Reembolso' : res;
+                final motivo = _labelMotivoDevPdf(d['productosDevueltos']);
+                final productos_dev = _resumenProductosDevPdf(d['productosDevueltos']);
+                return pw.Table(
+                  columnWidths: {
+                    0: const pw.FlexColumnWidth(1.8),
+                    1: const pw.FlexColumnWidth(2.0),
+                    2: const pw.FlexColumnWidth(2.5),
+                    3: const pw.FlexColumnWidth(3.5),
+                    4: const pw.FlexColumnWidth(2.0),
+                    5: const pw.FlexColumnWidth(1.8),
+                    6: const pw.FlexColumnWidth(1.8),
+                  },
+                  border: pw.TableBorder.all(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                  children: [
+                    pw.TableRow(decoration: pw.BoxDecoration(color: bg), children: [
+                      _pdfTd(_formatFechaStr(d['fechaSolicitud'])),
+                      _pdfTd(d['numeroPedido']?.toString() ?? '—'),
+                      _pdfTd(d['nombreCliente']?.toString() ?? '—'),
+                      _pdfTd(productos_dev),
+                      _pdfTd(motivo),
+                      _pdfTd(resLabel),
+                      _pdfTd('\$ ${_formatPrecioColombia((d["montoDevolucion"] as num?)?.toDouble() ?? 0.0)}'),
+                    ]),
+                  ],
+                );
+              }),
+              pw.SizedBox(height: 24),
+            ],
+          ],
+
+          // ── SECCIÓN PRODUCTOS / STOCK ────────────────────────
+          if (conProductos && productos.isNotEmpty) ...[
+            pw.Divider(color: verde, thickness: 1),
+            pw.SizedBox(height: 12),
+            pw.Text('STOCK DE PRODUCTOS',
+                style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: verde)),
+            pw.SizedBox(height: 10),
+            pw.Row(children: [
+              _pdfStockKpi('Total productos', '${productos.length}', PdfColors.grey600, PdfColors.grey100),
+              pw.SizedBox(width: 6),
+              _pdfStockKpi('Óptimo',     '$okN',      PdfColor.fromHex('2D6A4F'), PdfColor.fromHex('D8F3DC')),
+              pw.SizedBox(width: 6),
+              _pdfStockKpi('Stock bajo', '$bajosN',   PdfColor.fromHex('E67E22'), PdfColor.fromHex('FFF9C4')),
+              pw.SizedBox(width: 6),
+              _pdfStockKpi('Sin stock',  '$sinStockN', PdfColor.fromHex('C0392B'), PdfColor.fromHex('FFEBEE')),
+            ]),
+            pw.SizedBox(height: 10),
+            pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+              pw.Expanded(child: _pdfInvKpi('VALOR INV. VENTA',      fmtInv(valorInv),          'Precio de venta × stock actual')),
+              pw.SizedBox(width: 8),
+              pw.Expanded(child: _pdfInvKpi('VALOR INV. COSTO',      fmtInv(valorInvProv),       'Precio proveedor × stock actual')),
+              pw.SizedBox(width: 8),
+              pw.Expanded(child: _pdfInvKpi('GANANCIA POTENCIAL',    fmtInv(gananciaPotencial),  'Venta − costo del inventario')),
+              pw.SizedBox(width: 8),
+              pw.Expanded(child: _pdfInvKpi('MARGEN TOTAL',
+                  valorInv > 0 ? '${pctGanTotal.toStringAsFixed(1)}%' : '—',
+                  'Ganancia sobre precio de venta')),
+            ]),
+            pw.SizedBox(height: 12),
+            pw.Table(
+              columnWidths: {
+                0: const pw.FlexColumnWidth(3.0), 1: const pw.FlexColumnWidth(1.8),
+                2: const pw.FlexColumnWidth(1.2), 3: const pw.FlexColumnWidth(1.8),
+                4: const pw.FlexColumnWidth(1.8), 5: const pw.FlexColumnWidth(2.0),
+                6: const pw.FlexColumnWidth(1.5),
+              },
+              children: [
+                pw.TableRow(
+                  decoration: pw.BoxDecoration(color: verdeOsc),
+                  children: [
+                    _pdfTh('Producto'), _pdfTh('Categoría'), _pdfTh('Stock'),
+                    _pdfTh('Estado'),   _pdfTh('Precio venta x Und.'),
+                    _pdfTh('Precio costo x Und.'), _pdfTh('% Ganancia'),
+                  ],
+                ),
+              ],
+            ),
+            ...(() {
+              final sorted = List<Map<String, dynamic>>.from(productos)
+                ..sort((a, b) {
+                  int ord(Map p) {
+                    final e = estadoStock(p);
+                    if (e == 'sinStock') return 0;
+                    if (e == 'bajo')     return 1;
+                    return 2;
+                  }
+                  return ord(a).compareTo(ord(b));
+                });
+              return sorted.asMap().entries.map((e) {
+                final p      = e.value;
+                final stock  = (p['stock']  as num?)?.toInt()    ?? 0;
+                final precio = (p['precio'] as num?)?.toDouble() ?? 0.0;
+                final pProv  = (p['precioProveedor'] as num?)?.toDouble() ?? 0.0;
+                final margen = precio - pProv;
+                final pctGan = precio > 0 ? (margen / precio * 100) : 0.0;
+                final est    = estadoStock(p);
+                PdfColor bg; String estadoTxt;
+                if (est == 'sinStock')  { bg = rojo2;    estadoTxt = 'Sin stock';  }
+                else if (est == 'bajo') { bg = amarillo; estadoTxt = 'Stock bajo'; }
+                else                   { bg = verde2;    estadoTxt = 'Optimo';     }
+                final pctColor = pctGan >= 0
+                    ? PdfColor.fromHex('2E7D32') : PdfColor.fromHex('C62828');
+                return pw.Table(
+                  columnWidths: {
+                    0: const pw.FlexColumnWidth(3.0), 1: const pw.FlexColumnWidth(1.8),
+                    2: const pw.FlexColumnWidth(1.2), 3: const pw.FlexColumnWidth(1.8),
+                    4: const pw.FlexColumnWidth(1.8), 5: const pw.FlexColumnWidth(2.0),
+                    6: const pw.FlexColumnWidth(1.5),
+                  },
+                  border: pw.TableBorder(
+                    left:   pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                    right:  pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                    bottom: pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                    verticalInside: pw.BorderSide(color: PdfColor.fromHex('E0E0E0'), width: 0.5),
+                  ),
+                  children: [
+                    pw.TableRow(decoration: pw.BoxDecoration(color: bg), children: [
                       _pdfTd(p['nombre'].toString()),
                       _pdfTd(p['categoria'].toString()),
                       _pdfTd('$stock'),
                       _pdfTd(estadoTxt),
                       _pdfTd(precio > 0 ? '\$ ${_formatPrecioColombia(precio)}' : '—'),
-                    ]);
-                  }).toList();
-                })(),
-              ],
-            ),
+                      _pdfTd(pProv  > 0 ? '\$ ${_formatPrecioColombia(pProv)}'  : '—',
+                          color: PdfColor.fromHex('E65100')),
+                      _pdfTd(pProv  > 0 ? '${pctGan.toStringAsFixed(1)}%' : '—',
+                          color: pctColor, bold: true),
+                    ]),
+                  ],
+                );
+              }).toList();
+            })(),
           ],
         ],
       ));
 
       await Printing.layoutPdf(
         onLayout: (_) async => doc.save(),
-        name: 'reporte_granmolino_${DateFormat('yyyyMMdd').format(DateTime.now())}.pdf',
+        name: 'reporte_granmolino_${DateFormat("yyyyMMdd").format(DateTime.now())}.pdf',
       );
       _snack('PDF generado correctamente', TipoNotificacion.exito);
     } catch (e) {
@@ -405,73 +1000,16 @@ class _ReportesPageState extends State<ReportesPage> {
     }
   }
 
-  // ── Helpers PDF ───────────────────────────────────────────────
-  pw.Widget _pdfTh(String text) => pw.Padding(
-        padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-        child: pw.Text(text,
-            style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold, color: PdfColors.white)));
-
-  pw.Widget _pdfTd(String text) => pw.Padding(
-        padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        child: pw.Text(text, style: const pw.TextStyle(fontSize: 8)));
-
-  pw.Widget _pdfStockKpi(String label, String value, PdfColor bg) =>
-      pw.Expanded(
-        child: pw.Container(
-          padding: const pw.EdgeInsets.all(7),
-          decoration: pw.BoxDecoration(
-            color: bg,
-            borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
-            border: pw.Border.all(color: PdfColors.grey300, width: 0.5),
-          ),
-          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-            pw.Text(label,  style: pw.TextStyle(fontSize: 7, color: PdfColors.grey600)),
-            pw.SizedBox(height: 3),
-            pw.Text(value,  style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)),
-          ]),
-        ),
-      );
-
-  pw.TableRow _pdfEstadoRow(String estado, int cant, int total, double? ing, PdfColor bg) {
-    final pct = total > 0 ? (cant / total * 100).toStringAsFixed(1) : '0.0';
-    return pw.TableRow(decoration: pw.BoxDecoration(color: bg), children: [
-      _pdfTd(estado), _pdfTd('$cant'), _pdfTd('$pct%'),
-      _pdfTd(ing != null ? '\$ ${_formatPrecioColombia(ing)}' : '—'),
-    ]);
-  }
-
-  double _ingresosEstado(String estado) => _pedidosCache
-      .where((p) => p['estado'] == estado)
-      .fold(0.0, (s, p) => s + ((p['total'] as num?) ?? 0.0));
-
+  // ── Helpers ───────────────────────────────────────────────────
   String _getNombreCliente(Map<String, dynamic> p) {
     if (p['nombreCliente'] != null) return p['nombreCliente'].toString();
     final c = p['cliente'] as Map<String, dynamic>?;
     return c?['nombre']?.toString() ?? 'Sin nombre';
   }
 
-  String _nombreEstado(String? e) {
-    switch (e) {
-      case 'pendiente':  return 'Pendiente';
-      case 'confirmado': return 'Confirmado';
-      case 'entregado':  return 'Entregado';
-      case 'cancelado':  return 'Cancelado';
-      default:           return e ?? '—';
-    }
-  }
+  String _formatPrecioColombia(double valor) =>
+      NumberFormat('#,##0', 'es_CO').format(valor.toInt());
 
-  String _formatFechaStr(dynamic ts) {
-    if (ts == null || ts is! Timestamp) return 'Sin fecha';
-    try { return DateFormat('dd/MM/yyyy HH:mm').format(ts.toDate()); }
-    catch (_) { return '—'; }
-  }
-
-  String _formatPrecioColombia(double valor) {
-    final formateador = NumberFormat('#,##0', 'es_CO');
-    return formateador.format(valor.toInt());
-  }
-
-  // ── FIX 5: etiquetaPeriodo muestra fecha cuando solo hay un día ──
   String _etiquetaPeriodo() {
     switch (_periodo) {
       case 'hoy':    return 'Hoy';
@@ -479,8 +1017,7 @@ class _ReportesPageState extends State<ReportesPage> {
       case 'custom':
         if (_fechaInicio != null && _fechaFin != null)
           return '${DateFormat('dd/MM/yy').format(_fechaInicio!)} – ${DateFormat('dd/MM/yy').format(_fechaFin!)}';
-        if (_fechaInicio != null)
-          return DateFormat('dd/MM/yy').format(_fechaInicio!); // un solo día
+        if (_fechaInicio != null) return DateFormat('dd/MM/yy').format(_fechaInicio!);
         return 'Personalizado';
       default: return 'Este mes';
     }
@@ -506,7 +1043,8 @@ class _ReportesPageState extends State<ReportesPage> {
     if (picked != null) {
       setState(() {
         if (esInicio) _fechaInicio = picked; else _fechaFin = picked;
-        _periodo = 'custom'; _ultimosIds = '';
+        _periodo    = 'custom';
+        _ultimosIds = '';
       });
     }
   }
@@ -528,7 +1066,6 @@ class _ReportesPageState extends State<ReportesPage> {
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
             ]),
             const SizedBox(height: 8),
-            // ── FIX: aviso cuando solo se selecciona una fecha ──
             AnimatedSize(
               duration: const Duration(milliseconds: 200),
               child: _fechaInicio != null && _fechaFin == null
@@ -543,12 +1080,10 @@ class _ReportesPageState extends State<ReportesPage> {
                       child: Row(children: [
                         Icon(Icons.info_outline, size: 16, color: Colors.orange.shade700),
                         const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Si no seleccionas fecha "Hasta", se filtrará solo el día ${DateFormat('dd/MM/yyyy').format(_fechaInicio!)}',
-                            style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
-                          ),
-                        ),
+                        Expanded(child: Text(
+                          'Si no seleccionas fecha "Hasta", se filtrará solo el día ${DateFormat('dd/MM/yyyy').format(_fechaInicio!)}',
+                          style: TextStyle(fontSize: 12, color: Colors.orange.shade800),
+                        )),
                       ]),
                     )
                   : const SizedBox.shrink(),
@@ -565,10 +1100,7 @@ class _ReportesPageState extends State<ReportesPage> {
             Row(children: [
               Expanded(child: OutlinedButton(
                 onPressed: () {
-                  setState(() {
-                    _fechaInicio = null; _fechaFin = null;
-                    _periodo = 'mes'; _ultimosIds = '';
-                  });
+                  setState(() { _fechaInicio = null; _fechaFin = null; _periodo = 'mes'; _ultimosIds = ''; });
                   Navigator.pop(ctx);
                 },
                 style: OutlinedButton.styleFrom(
@@ -579,15 +1111,12 @@ class _ReportesPageState extends State<ReportesPage> {
                 child: const Text('Limpiar'),
               )),
               const SizedBox(width: 12),
-              // ── FIX 3: Aplicar con aviso si solo hay fecha inicio ──
               Expanded(child: ElevatedButton(
                 onPressed: () {
                   Navigator.pop(ctx);
                   if (_fechaInicio != null && _fechaFin == null) {
-                    _snack(
-                      'Mostrando datos del día ${DateFormat('dd/MM/yyyy').format(_fechaInicio!)}',
-                      TipoNotificacion.advertencia,
-                    );
+                    _snack('Mostrando datos del día ${DateFormat('dd/MM/yyyy').format(_fechaInicio!)}',
+                        TipoNotificacion.advertencia);
                   }
                 },
                 style: ElevatedButton.styleFrom(
@@ -626,41 +1155,48 @@ class _ReportesPageState extends State<ReportesPage> {
                     Container(width: 5, height: 28,
                         decoration: BoxDecoration(color: _kColor, borderRadius: BorderRadius.circular(3))),
                     const SizedBox(width: 12),
-                    const Text('Reportes y Analisis',
+                    const Text('Reportes y Análisis',
                         style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold,
                             color: _kColorDark, letterSpacing: -0.3)),
                   ]),
                   Row(mainAxisSize: MainAxisSize.min, children: [
-                    HeaderIconBtn(icon: Icons.calendar_month_rounded, isActive: _hayFiltroCustom,
-                        tooltip: 'Filtrar por fecha', onTap: _mostrarFiltroFechas),
+                    HeaderIconBtn(
+                      icon: Icons.calendar_month_rounded,
+                      isActive: _hayFiltroCustom,
+                      tooltip: 'Filtrar por fecha',
+                      onTap: _mostrarFiltroFechas,
+                    ),
                     const SizedBox(width: 10),
-                    ExportBtn(label: 'Excel', icon: Icons.table_chart_rounded,
-                        color: const Color(0xFF1E7145), loading: _exportandoExcel, onTap: _exportarExcel),
+                    ExportBtn(
+                      label: 'Excel', icon: Icons.table_chart_rounded,
+                      color: const Color(0xFF1E7145),
+                      loading: _exportandoExcel, onTap: _exportarExcel,
+                    ),
                     const SizedBox(width: 8),
-                    ExportBtn(label: 'PDF', icon: Icons.picture_as_pdf_rounded,
-                        color: const Color(0xFFE53935), loading: _exportandoPdf, onTap: _exportarPdf),
+                    ExportBtn(
+                      label: 'PDF', icon: Icons.picture_as_pdf_rounded,
+                      color: const Color(0xFFE53935),
+                      loading: _exportandoPdf, onTap: _mostrarOpcionesPdf,
+                    ),
                   ]),
                 ]),
                 const SizedBox(height: 14),
                 Row(children: [
-                  PeriodChip(label: 'Hoy', isSelected: _periodo == 'hoy',
-                      onTap: () => _cambiarPeriodo('hoy')),
+                  PeriodChip(label: 'Hoy',      isSelected: _periodo == 'hoy',    onTap: () => _cambiarPeriodo('hoy')),
                   const SizedBox(width: 8),
-                  PeriodChip(label: '7 dias', isSelected: _periodo == 'semana',
-                      onTap: () => _cambiarPeriodo('semana')),
+                  PeriodChip(label: '7 días',   isSelected: _periodo == 'semana', onTap: () => _cambiarPeriodo('semana')),
                   const SizedBox(width: 8),
-                  PeriodChip(label: 'Este mes', isSelected: _periodo == 'mes',
-                      onTap: () => _cambiarPeriodo('mes')),
+                  PeriodChip(label: 'Este mes', isSelected: _periodo == 'mes',    onTap: () => _cambiarPeriodo('mes')),
                   if (_hayFiltroCustom) ...[
                     const SizedBox(width: 8),
-                    // ── FIX 4: chip muestra la fecha cuando es un solo día ──
                     PeriodChip(
                       label: _fechaInicio != null
                           ? (_fechaFin != null
                               ? '${DateFormat('dd/MM').format(_fechaInicio!)} – ${DateFormat('dd/MM').format(_fechaFin!)}'
                               : DateFormat('dd/MM').format(_fechaInicio!))
                           : 'Personalizado',
-                      isSelected: true, color: const Color(0xFFD35400),
+                      isSelected: true,
+                      color: const Color(0xFFD35400),
                       onTap: _mostrarFiltroFechas,
                     ),
                   ],
@@ -682,38 +1218,48 @@ class _ReportesPageState extends State<ReportesPage> {
                     return const Center(child: CircularProgressIndicator(color: _kColor));
                   }
 
-                  // ── FIX 2: filtro usa _fechaFinEfectiva (cubre también el caso de un solo día) ──
                   final pedidos = snapshot.data!.docs
-                      .map((d) => d.data() as Map<String, dynamic>)
+                      .map((d) {
+                        final data = d.data() as Map<String, dynamic>;
+                        // Incluir el docId para poder buscar en detalle_pedido
+                        data['__docId'] = d.id;
+                        return data;
+                      })
                       .where((p) {
                     if (_periodo == 'custom') {
                       final ts = p['fechaPedido'] ?? p['creadoEn'];
                       if (ts is! Timestamp) return false;
                       final fechaFin = _fechaFinEfectiva;
                       if (fechaFin == null) return true;
-                      final fin = DateTime(
-                          fechaFin.year, fechaFin.month, fechaFin.day, 23, 59, 59);
+                      final fin = DateTime(fechaFin.year, fechaFin.month, fechaFin.day, 23, 59, 59);
                       return !ts.toDate().isAfter(fin);
                     }
                     return true;
                   }).toList();
 
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (mounted) {
-                      _pedidosCache = List.from(pedidos);
-                      _cargarTopProductos(pedidos);
-                    }
-                  });
+                  if (!_topProductosPendiente) {
+                    _topProductosPendiente = true;
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      _topProductosPendiente = false;
+                      if (mounted) {
+                        _pedidosCache = List.from(pedidos);
+                        _cargarTopProductos(pedidos);
+                        // Corregir totales de pedidos con reenvío entregado
+                        // que aún no tienen los campos nuevos en Firestore
+                        _recalcularTotalesReenvio(pedidos);
+                      }
+                    });
+                  }
 
-                  final total      = pedidos.length;
-                  final pendientes = pedidos.where((p) => p['estado'] == 'pendiente').length;
-                  final confirmados= pedidos.where((p) => p['estado'] == 'confirmado').length;
-                  final entregados = pedidos.where((p) => p['estado'] == 'entregado').length;
-                  final cancelados = pedidos.where((p) => p['estado'] == 'cancelado').length;
-                  final ingresos   = pedidos
-                      .where((p) => p['estado'] == 'entregado' || p['estado'] == 'confirmado')
-                      .fold(0.0, (s, p) => s + ((p['total'] as num?) ?? 0.0));
-                  final activos = total - cancelados;
+                  final total       = pedidos.length;
+                  final pendientes  = pedidos.where((p) => p['estado'] == 'pendiente').length;
+                  final confirmados = pedidos.where((p) => p['estado'] == 'confirmado').length;
+                  final entregados  = pedidos.where((p) => p['estado'] == 'entregado').length;
+                  final cancelados  = pedidos.where((p) => p['estado'] == 'cancelado').length;
+                  final ingresos    = pedidos
+                      .where((p) => p['estado'] == 'entregado')
+                      .fold(0.0, (s, p) => s + _totalRealPedido(p));
+                  final activos = entregados;
                   final ticket  = activos > 0 ? ingresos / activos : 0.0;
 
                   return ListView(
@@ -722,7 +1268,8 @@ class _ReportesPageState extends State<ReportesPage> {
                       KpiGrid(
                           totalPedidos: total, ingresos: ingresos,
                           ticketPromedio: ticket, entregados: entregados,
-                          pendientes: pendientes, cancelados: cancelados),
+                          pendientes: pendientes, cancelados: cancelados,
+                          confirmados: confirmados),
                       const SizedBox(height: 24),
                       Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                         Expanded(flex: 5, child: ChartCard(
@@ -734,37 +1281,13 @@ class _ReportesPageState extends State<ReportesPage> {
                             totalPedidos: total, entregados: entregados)),
                       ]),
                       const SizedBox(height: 24),
-                      _loadingProds
-                          ? Card(
-                              elevation: 0, color: Colors.white,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                                side: BorderSide(color: Colors.grey.shade200),
-                              ),
-                              child: const Padding(
-                                padding: EdgeInsets.all(48),
-                                child: Center(child: CircularProgressIndicator(color: _kColor)),
-                              ),
-                            )
-                          : ProductosMasVendidos(productos: _topProductos),
-                      const SizedBox(height: 24),
-                      const StockCard(),
-                      const SizedBox(height: 24),
-                      SectionHeader(
-                          icon: Icons.receipt_long_rounded,
-                          label: 'Pedidos del periodo',
-                          badge: total > 0 ? '$total' : null),
-                      const SizedBox(height: 12),
-                      if (pedidos.isEmpty)
-                        const _EmptyState()
-                      else
-                        ...pedidos.map((p) => Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: _PedidoCard(
-                                pedido: p,
-                                formatPrecioColombia: _formatPrecioColombia,
-                              ),
-                            )),
+                      SectionBanners(
+                        topProductos    : _topProductos,
+                        loadingProds    : _loadingProds,
+                        pedidos         : pedidos,
+                        formatPrecio    : _formatPrecioColombia,
+                        kStockMinDefault: _kStockMinDefault,
+                      ),
                       const SizedBox(height: 20),
                     ],
                   );
@@ -776,229 +1299,96 @@ class _ReportesPageState extends State<ReportesPage> {
       ),
     );
   }
-}
 
-class _PedidoCard extends StatefulWidget {
-  final Map<String, dynamic> pedido;
-  final Function(double) formatPrecioColombia;
-  const _PedidoCard({required this.pedido, required this.formatPrecioColombia});
-  @override
-  State<_PedidoCard> createState() => _PedidoCardState();
-}
+  // ── Helpers PDF ───────────────────────────────────────────────
+  pw.Widget _pdfTh(String text) => pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        child: pw.Text(text, style: pw.TextStyle(
+            fontSize: 9, fontWeight: pw.FontWeight.bold, color: PdfColors.white)));
 
-class _PedidoCardState extends State<_PedidoCard> {
-  bool _expandido = false;
-  List<Map<String, dynamic>> _productos = [];
-  bool _cargandoProductos = false;
+  pw.Widget _pdfTd(String text, {PdfColor? color, bool bold = false}) => pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: pw.Text(text, style: pw.TextStyle(
+            fontSize: 8, color: color,
+            fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal)));
 
-  @override
-  void initState() { super.initState(); _cargarProductos(); }
+  pw.Widget _pdfStockKpi(String label, String value, PdfColor color, PdfColor bg) =>
+      pw.Expanded(
+        child: pw.Container(
+          padding: const pw.EdgeInsets.all(7),
+          decoration: pw.BoxDecoration(
+            color: bg,
+            borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+            border: pw.Border.all(color: color, width: 0.5),
+          ),
+          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+            pw.Text(label, style: pw.TextStyle(fontSize: 7, color: color)),
+            pw.SizedBox(height: 3),
+            pw.Text(value, style: pw.TextStyle(
+                fontSize: 9, fontWeight: pw.FontWeight.bold, color: color)),
+          ]),
+        ),
+      );
 
-  Future<void> _cargarProductos() async {
-    final idPedido = widget.pedido['idPedido']?.toString() ?? '';
-    if (idPedido.isEmpty) return;
-    setState(() => _cargandoProductos = true);
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection('detalle_pedido')
-          .where('idPedido', isEqualTo: idPedido)
-          .get();
-      if (mounted) {
-        setState(() {
-          _productos = snap.docs.map((d) => d.data()).toList();
-          _cargandoProductos = false;
-        });
+  // Helper para KPIs de inventario (extraído para no repetir código)
+  pw.Widget _pdfInvKpi(String label, String value, String sub) => pw.Container(
+    padding: const pw.EdgeInsets.all(12),
+    decoration: pw.BoxDecoration(
+      color: PdfColors.white,
+      borderRadius: pw.BorderRadius.circular(8),
+      border: pw.Border.all(color: PdfColor.fromHex('2D6A4F'), width: 1.5),
+    ),
+    child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+      pw.Text(label, style: pw.TextStyle(
+          fontSize: 7, color: PdfColor.fromHex('2D6A4F'), fontWeight: pw.FontWeight.bold)),
+      pw.SizedBox(height: 7),
+      pw.Text(value, style: pw.TextStyle(
+          fontSize: 13, color: PdfColor.fromHex('1B4332'), fontWeight: pw.FontWeight.bold)),
+      pw.SizedBox(height: 4),
+      pw.Text(sub, style: pw.TextStyle(fontSize: 6.5, color: PdfColors.grey500)),
+    ]),
+  );
+
+  pw.TableRow _pdfEstadoRow(String estado, int cant, int total, double? ing, PdfColor bg) {
+    final pct = total > 0 ? (cant / total * 100).toStringAsFixed(1) : '0.0';
+    return pw.TableRow(decoration: pw.BoxDecoration(color: bg), children: [
+      _pdfTd(estado), _pdfTd('$cant'), _pdfTd('$pct%'),
+      _pdfTd(ing != null ? '\$ ${_formatPrecioColombia(ing)}' : '—'),
+    ]);
+  }
+
+  double _ingresosEstado(String estado) => _pedidosCache
+      .where((p) => p['estado'] == estado)
+      .fold(0.0, (s, p) => s + _totalRealPedido(p));
+
+  /// Devuelve el total real de un pedido, considerando reenvíos.
+  /// Para pedidos con reenvío ya entregado, usa totalPrimeraEntrega + totalReenvio
+  /// si están disponibles, de lo contrario usa el campo total directamente.
+  double _totalRealPedido(Map<String, dynamic> p) {
+    if (p['esReenvio'] == true && p['estado'] == 'entregado') {
+      final primeraEntrega = (p['totalPrimeraEntrega'] as num?)?.toDouble();
+      final reenvio        = (p['totalReenvio']        as num?)?.toDouble();
+      if (primeraEntrega != null && reenvio != null) {
+        return primeraEntrega + reenvio;
       }
-    } catch (e) {
-      if (mounted) setState(() => _cargandoProductos = false);
     }
-  }
-
-  String get _cliente {
-    if (widget.pedido['nombreCliente'] != null) return widget.pedido['nombreCliente'].toString();
-    final c = widget.pedido['cliente'] as Map<String, dynamic>?;
-    return c?['nombre']?.toString() ?? 'Cliente no identificado';
-  }
-
-  String get _codigoPedido {
-    final n = widget.pedido['numeroPedido']?.toString() ?? '';
-    if (n.isNotEmpty) return n;
-    return widget.pedido['idPedido']?.toString() ?? '—';
-  }
-
-  String _formatFecha(dynamic ts) {
-    if (ts == null || ts is! Timestamp) return 'Sin fecha';
-    try { return DateFormat('dd/MM/yyyy HH:mm').format(ts.toDate()); }
-    catch (_) { return '—'; }
+    return (p['total'] as num?)?.toDouble() ?? 0.0;
   }
 
   String _nombreEstado(String? e) {
     switch (e) {
       case 'pendiente':  return 'Pendiente';
       case 'confirmado': return 'Confirmado';
+      case 'despachado': return 'Despachado';
       case 'entregado':  return 'Entregado';
       case 'cancelado':  return 'Cancelado';
       default:           return e ?? '—';
     }
   }
 
-  Color _colorEstado(String? e) {
-    switch (e) {
-      case 'pendiente':  return Colors.orange;
-      case 'confirmado': return const Color(0xFF1976D2);
-      case 'entregado':  return _kColor;
-      case 'cancelado':  return Colors.redAccent;
-      default:           return Colors.grey;
-    }
+  String _formatFechaStr(dynamic ts) {
+    if (ts == null || ts is! Timestamp) return 'Sin fecha';
+    try { return DateFormat('dd/MM/yyyy HH:mm').format(ts.toDate()); }
+    catch (_) { return '—'; }
   }
-
-  @override
-  Widget build(BuildContext context) {
-    final estado = widget.pedido['estado'] ?? 'pendiente';
-    final total  = (widget.pedido['total'] as num?)?.toDouble() ?? 0.0;
-    final fecha  = _formatFecha(widget.pedido['fechaPedido'] ?? widget.pedido['creadoEn']);
-    final color  = _colorEstado(estado);
-
-    return Card(
-      elevation: 0, color: Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: Colors.grey.shade100),
-      ),
-      child: Column(children: [
-        InkWell(
-          onTap: () => setState(() => _expandido = !_expandido),
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-            child: Row(children: [
-              Container(width: 4, height: 44,
-                  decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(4))),
-              const SizedBox(width: 14),
-              CircleAvatar(
-                radius: 20, backgroundColor: color.withOpacity(0.1),
-                child: Text(
-                  _cliente.isNotEmpty ? _cliente[0].toUpperCase() : '?',
-                  style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(_cliente, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                const SizedBox(height: 4),
-                Text(_codigoPedido,
-                    style: TextStyle(fontSize: 12, color: Colors.grey[500], fontWeight: FontWeight.w500)),
-                const SizedBox(height: 4),
-                Text(fecha, style: TextStyle(fontSize: 11, color: Colors.grey[400])),
-              ])),
-              Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                Text('\$ ${widget.formatPrecioColombia(total)}',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: _kColor)),
-                const SizedBox(height: 5),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                  decoration: BoxDecoration(
-                      color: color.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(20)),
-                  child: Text(_nombreEstado(estado),
-                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: color)),
-                ),
-              ]),
-              const SizedBox(width: 8),
-              Icon(_expandido ? Icons.expand_less : Icons.expand_more, color: Colors.grey[400]),
-            ]),
-          ),
-        ),
-        if (_expandido) ...[
-          const Divider(height: 1),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Productos',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.grey[700])),
-              const SizedBox(height: 12),
-              if (_cargandoProductos)
-                const Center(child: CircularProgressIndicator(color: _kColor))
-              else if (_productos.isEmpty)
-                Text('Sin detalles de productos', style: TextStyle(color: Colors.grey[500]))
-              else
-                Column(children: _productos.map((prod) {
-                  final nombre         = (prod['nombreProducto'] ?? prod['nombre'] ?? 'N/A').toString();
-                  final cantidad        = prod['cantidad'] ?? 0;
-                  final precioUnitario = (prod['precioUnitario'] as num?)?.toDouble() ?? 0.0;
-                  final subtotal       = (prod['subtotal'] as num?)?.toDouble() ?? 0.0;
-                  final omitido        = prod['omitido'] == true;
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Row(children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: omitido ? Colors.red[50] : Colors.teal[50],
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text('${cantidad}x',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 12,
-                              color: omitido ? Colors.red[300] : Colors.teal[700],
-                            )),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(nombre,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w500, fontSize: 13,
-                              decoration: omitido ? TextDecoration.lineThrough : TextDecoration.none,
-                              decorationColor: omitido ? Colors.grey[700] : null,
-                              decorationThickness: omitido ? 2.0 : null,
-                              color: omitido ? Colors.grey[700] : Colors.black87,
-                            )),
-                        const SizedBox(height: 2),
-                        Text('\$ ${widget.formatPrecioColombia(precioUnitario)} c/u',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: omitido ? Colors.grey[600] : Colors.grey[500],
-                              decoration: omitido ? TextDecoration.lineThrough : TextDecoration.none,
-                              decorationColor: omitido ? Colors.grey[600] : null,
-                              decorationThickness: omitido ? 2.0 : null,
-                            )),
-                      ])),
-                      if (omitido)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: Colors.red[100], borderRadius: BorderRadius.circular(4)),
-                          child: Text('Sin stock',
-                              style: TextStyle(fontSize: 10, color: Colors.red[700],
-                                  fontWeight: FontWeight.w600)),
-                        )
-                      else
-                        Text('\$ ${widget.formatPrecioColombia(subtotal)}',
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 13, color: _kColor)),
-                    ]),
-                  );
-                }).toList()),
-            ]),
-          ),
-        ],
-      ]),
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  const _EmptyState();
-  @override
-  Widget build(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(48),
-          child: Column(children: [
-            Icon(Icons.receipt_long_outlined, size: 60, color: Colors.grey[300]),
-            const SizedBox(height: 14),
-            Text('No hay pedidos en este periodo',
-                style: TextStyle(color: Colors.grey[500], fontSize: 15)),
-          ]),
-        ),
-      );
 }

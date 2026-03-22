@@ -68,6 +68,7 @@ class _ProductoFormDialog extends StatefulWidget {
 class _ProductoFormDialogState extends State<_ProductoFormDialog> {
   late final TextEditingController _nombreCtrl;
   late final TextEditingController _precioCtrl;
+  late final TextEditingController _precioProveedorCtrl;
   late final TextEditingController _subtextoCtrl;
   late final TextEditingController _stockCtrl;
   late final TextEditingController _codigoCtrl;
@@ -86,7 +87,8 @@ class _ProductoFormDialogState extends State<_ProductoFormDialog> {
   bool get _errorNombre    => _intentoGuardar && _nombreCtrl.text.trim().isEmpty;
   bool get _errorPrecio    => _intentoGuardar && _precioCtrl.text.trim().isEmpty;
   bool get _errorStock     => _intentoGuardar && _stockCtrl.text.trim().isEmpty;
-  bool get _errorDescripcion => _intentoGuardar && _subtextoCtrl.text.trim().isEmpty;
+  bool get _errorDescripcion      => _intentoGuardar && _subtextoCtrl.text.trim().isEmpty;
+  bool get _errorPrecioProveedor  => _intentoGuardar && _precioProveedorCtrl.text.trim().isEmpty;
   // _errorCategoria eliminado — categoría es opcional
 
   // ── Límites ───────────────────────────────────────────────
@@ -100,11 +102,12 @@ class _ProductoFormDialogState extends State<_ProductoFormDialog> {
     super.initState();
     final p = widget.productoExistente;
 
-    _nombreCtrl   = TextEditingController(text: p?['nombre']   ?? '');
-    _precioCtrl   = TextEditingController(text: p?['precio']?.toString()  ?? '');
-    _subtextoCtrl = TextEditingController(text: p?['subtexto'] ?? '');
-    _stockCtrl    = TextEditingController(text: p != null ? (p['stock'] ?? 0).toString() : '');
-    _codigoCtrl   = TextEditingController(text: p?['codigo']?.toString()  ?? '');
+    _nombreCtrl          = TextEditingController(text: p?['nombre']   ?? '');
+    _precioCtrl          = TextEditingController(text: p?['precio Venta']?.toString()          ?? '');
+    _precioProveedorCtrl = TextEditingController(text: p?['precio Costo']?.toString() ?? '');
+    _subtextoCtrl        = TextEditingController(text: p?['subtexto'] ?? '');
+    _stockCtrl           = TextEditingController(text: p != null ? (p['stock'] ?? 0).toString() : '');
+    _codigoCtrl          = TextEditingController(text: p?['codigo']?.toString()  ?? '');
 
     final img = p?['imagen'] as String? ?? '';
     _imagenUrlExistente = img.startsWith('http') ? img : '';
@@ -121,6 +124,7 @@ class _ProductoFormDialogState extends State<_ProductoFormDialog> {
 
     _nombreCtrl.addListener(() => setState(() {}));
     _precioCtrl.addListener(() => setState(() {}));
+    _precioProveedorCtrl.addListener(() => setState(() {}));
     _subtextoCtrl.addListener(() => setState(() {}));
     _stockCtrl.addListener(() => setState(() {}));
     _codigoCtrl.addListener(() => setState(() {}));
@@ -144,6 +148,7 @@ class _ProductoFormDialogState extends State<_ProductoFormDialog> {
   void dispose() {
     _nombreCtrl.dispose();
     _precioCtrl.dispose();
+    _precioProveedorCtrl.dispose();
     _subtextoCtrl.dispose();
     _stockCtrl.dispose();
     _codigoCtrl.dispose();
@@ -178,6 +183,7 @@ class _ProductoFormDialogState extends State<_ProductoFormDialog> {
     return _codigoCtrl.text.trim().isNotEmpty &&
         _nombreCtrl.text.trim().isNotEmpty &&
         _precioCtrl.text.trim().isNotEmpty &&
+        _precioProveedorCtrl.text.trim().isNotEmpty &&
         _stockCtrl.text.trim().isNotEmpty &&
         _subtextoCtrl.text.trim().isNotEmpty &&
         (_imagenBytesNueva != null || _imagenUrlExistente.isNotEmpty);
@@ -221,25 +227,27 @@ class _ProductoFormDialogState extends State<_ProductoFormDialog> {
 
     if (widget.esEdicion) {
       resultado = await widget.servicio.actualizarProducto(
-        idProducto: widget.productoExistente!['id'],
-        nombre:    _nombreCtrl.text.trim(),
-        precio:    double.tryParse(_precioCtrl.text) ?? 0,
-        subtexto:  _subtextoCtrl.text.trim(),
-        categoria: _categoriaSeleccionada ?? '',
-        imagenUrl: imagenFinal,
-        stock:     int.tryParse(_stockCtrl.text) ?? 0,
-        codigo:    _codigoCtrl.text.trim(),
+        idProducto:      widget.productoExistente!['id'],
+        nombre:          _nombreCtrl.text.trim(),
+        precio:          double.tryParse(_precioCtrl.text) ?? 0,
+        precioProveedor: double.tryParse(_precioProveedorCtrl.text) ?? 0,
+        subtexto:        _subtextoCtrl.text.trim(),
+        categoria:       _categoriaSeleccionada ?? '',
+        imagenUrl:       imagenFinal,
+        stock:           int.tryParse(_stockCtrl.text) ?? 0,
+        codigo:          _codigoCtrl.text.trim(),
       );
     } else {
       resultado = await widget.servicio.crearProducto(
-        nombre:    _nombreCtrl.text.trim(),
-        precio:    double.tryParse(_precioCtrl.text) ?? 0,
-        categoria: _categoriaSeleccionada ?? '',
-        subtexto:  _subtextoCtrl.text.trim(),
-        idAdmin:   'admin',
-        imagenUrl: imagenFinal,
-        stock:     int.tryParse(_stockCtrl.text) ?? 0,
-        codigo:    _codigoCtrl.text.trim(),
+        nombre:          _nombreCtrl.text.trim(),
+        precio:          double.tryParse(_precioCtrl.text) ?? 0,
+        precioProveedor: double.tryParse(_precioProveedorCtrl.text) ?? 0,
+        categoria:       _categoriaSeleccionada ?? '',
+        subtexto:        _subtextoCtrl.text.trim(),
+        idAdmin:         'admin',
+        imagenUrl:       imagenFinal,
+        stock:           int.tryParse(_stockCtrl.text) ?? 0,
+        codigo:          _codigoCtrl.text.trim(),
       );
     }
 
@@ -523,6 +531,28 @@ class _ProductoFormDialogState extends State<_ProductoFormDialog> {
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 14),
+
+              // ── Precio Proveedor (solo administrador) ────────
+              TextField(
+                controller: _precioProveedorCtrl,
+                keyboardType: TextInputType.number,
+                inputFormatters: [
+                  _SoloNumerosFormatter(),
+                  LengthLimitingTextInputFormatter(_maxPrecio),
+                ],
+                decoration: _deco(
+                  label: 'Precio Proveedor',
+                  hayError: _errorPrecioProveedor,
+                  prefixText: '\$ ',
+                  helper: 'Solo números · Máx. $_maxPrecio dígitos',
+                  suffix: Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: _contador(_precioProveedorCtrl.text.length, _maxPrecio),
+                  ),
+                  suffixConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+                ),
               ),
               const SizedBox(height: 14),
 

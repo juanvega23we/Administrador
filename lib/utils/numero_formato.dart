@@ -22,10 +22,11 @@ String formatearPrecioCOP(dynamic precio) {
 }
 
 /// Formatea un número grande a forma abreviada.
-/// Ej: 1500000 → "1.5M" | 2500 → "3K" | 500 → "500"
+/// Ej: 1500000 → "1.5M" | 116620 → "116K" | 500 → "500"
+/// Usa floor() para truncar y no redondear hacia arriba.
 String formatearNumeroCorto(dynamic v) {
   final n = ((v ?? 0.0) as num).toDouble();
   if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
-  if (n >= 1000)    return '${(n / 1000).toStringAsFixed(0)}K';
+  if (n >= 1000)    return '${(n / 1000).floor()}K';
   return n.toStringAsFixed(0);
 }

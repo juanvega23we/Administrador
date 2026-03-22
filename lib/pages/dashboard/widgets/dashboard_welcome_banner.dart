@@ -4,7 +4,12 @@ import 'dart:math' as math;
 
 class DashboardWelcomeBanner extends StatefulWidget {
   final String nombreAdmin;
-  const DashboardWelcomeBanner({super.key, required this.nombreAdmin});
+  final String? subtitulo;
+  const DashboardWelcomeBanner({
+    super.key,
+    required this.nombreAdmin,
+    this.subtitulo,
+  });
   @override
   State<DashboardWelcomeBanner> createState() => _DashboardWelcomeBannerState();
 }
@@ -45,7 +50,6 @@ class _DashboardWelcomeBannerState extends State<DashboardWelcomeBanner>
         scale: _entryScale,
         child: Container(
           width: double.infinity,
-          // Sin altura fija — se adapta al contenido
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(28),
             gradient: const LinearGradient(
@@ -129,7 +133,7 @@ class _DashboardWelcomeBannerState extends State<DashboardWelcomeBanner>
                     ),
                   ),
                 ),
-                // Contenido — padding generoso para que no haga overflow
+                // Contenido
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 28),
                   child: Row(
@@ -166,6 +170,19 @@ class _DashboardWelcomeBannerState extends State<DashboardWelcomeBanner>
                                 height: 1.1,
                               ),
                             ),
+                            // ── Subtítulo (rol) ──
+                            if (widget.subtitulo != null) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                widget.subtitulo!,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Colors.white.withOpacity(0.65),
+                                  fontWeight: FontWeight.w500,
+                                  letterSpacing: 0.3,
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 14),
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -239,6 +256,3 @@ class _PulseDotState extends State<_PulseDot> with SingleTickerProviderStateMixi
     );
   }
 }
-
-
-

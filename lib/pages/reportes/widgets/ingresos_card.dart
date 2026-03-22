@@ -56,7 +56,7 @@ class IngresosCard extends StatelessWidget {
                   letterSpacing: -0.5),
             ),
             const SizedBox(height: 4),
-            Text('confirmados + entregados',
+            Text('solo pedidos entregados',
                 style: TextStyle(
                     color: Colors.white.withOpacity(0.55), fontSize: 11)),
             const SizedBox(height: 20),

@@ -31,6 +31,11 @@ dependencies:
   # Backup — descarga de archivos en Flutter Web
   universal_html: ^2.2.4
 
+  # Actualización masiva de precios por Excel
+  excel: ^4.0.6
+  file_picker: ^8.1.2
+  path_provider: ^2.1.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -41,3 +46,4 @@ flutter:
 
   assets:
     - assets/images/logo_granero.jpeg
+    - assets/images/fondo_login.jpeg

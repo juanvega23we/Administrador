@@ -66,8 +66,9 @@ class _DashboardStatCardState extends State<DashboardStatCard>
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
-          transform: Matrix4.identity()
-            ..translate(0.0, _hovered ? -4.0 : 0.0),
+          // FIX: se eliminó el transform translate(_hovered ? -4 : 0)
+          // que hacía que la card "subiera" y solapara el área de los
+          // pedidos de abajo, disparando su hover de forma fantasma.
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(16),
@@ -77,13 +78,7 @@ class _DashboardStatCardState extends State<DashboardStatCard>
                   : const Color(0xFFF1F5F9),
               width: 1.5,
             ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(_hovered ? 0.08 : 0.04),
-                blurRadius: _hovered ? 20 : 10,
-                offset: const Offset(0, 4),
-              ),
-            ],
+
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),

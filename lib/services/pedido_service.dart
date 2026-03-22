@@ -311,6 +311,63 @@ class PedidoService {
       final ventaRef    = _db.collection(_coleccionVenta).doc();
       final numeroVenta = await _generarNumeroVenta();
 
+      // ── CORRECCIÓN TOTALES REENVÍO ──────────────────────────────────
+      // Si el pedido tiene reenvío, recalcular el total real acumulado
+      // (primera entrega + reenvío) a partir del detalle_pedido.
+      // Esto garantiza que el total guardado en Firestore y en la venta
+      // refleje el cobro real completo, no solo el monto del reenvío.
+      double totalFinal = (pedidoActual['total'] as num?)?.toDouble() ?? 0.0;
+
+      if (pedidoActual['esReenvio'] == true) {
+        try {
+          final detalleSnap = await _db
+              .collection('detalle_pedido')
+              .where('idPedido', isEqualTo: idPedido)
+              .get();
+
+          double subtotalEntrega = 0;
+          double subtotalReenvio = 0;
+
+          for (final doc in detalleSnap.docs) {
+            final d      = doc.data();
+            final precio = (d['precioUnitario'] as num?)?.toDouble() ?? 0.0;
+
+            if (d['yaEntregado'] == true) {
+              // Producto de la primera entrega — usar cantidad original
+              final cant = (d['cantidad'] as num?)?.toInt() ?? 0;
+              subtotalEntrega += precio * cant;
+            } else if (d['esProductoReenvio'] == true) {
+              // Producto nuevo del reenvío
+              final cantReenv = (d['cantidadReenviada'] as num?)?.toInt() ?? 0;
+              final cant      = cantReenv > 0 ? cantReenv : ((d['cantidad'] as num?)?.toInt() ?? 0);
+              subtotalReenvio += precio * cant;
+            } else if ((d['cantidadDevuelta'] as num?)?.toInt() != null &&
+                       (d['cantidadDevuelta'] as num)!.toInt() > 0) {
+              // Producto parcialmente devuelto y reenviado
+              final cantOriginal = (d['cantidadOriginal'] as num?)?.toInt() ?? 0;
+              final cantDev      = (d['cantidadDevuelta']  as num?)?.toInt() ?? 0;
+              final cantReenv    = (d['cantidadReenviada'] as num?)?.toInt() ?? 0;
+              final cantEntregada = cantOriginal - cantDev;
+              if (cantEntregada > 0) subtotalEntrega += precio * cantEntregada;
+              if (cantReenv     > 0) subtotalReenvio += precio * cantReenv;
+            }
+          }
+
+          totalFinal = subtotalEntrega + subtotalReenvio;
+
+          // Persistir el total corregido y los subtotales en el pedido
+          await pedidoRef.update({
+            'total'               : totalFinal,
+            'totalPrimeraEntrega' : subtotalEntrega,
+            'totalReenvio'        : subtotalReenvio,
+          });
+        } catch (_) {
+          // Si falla el recálculo, usar el total guardado previamente
+          totalFinal = (pedidoActual['total'] as num?)?.toDouble() ?? 0.0;
+        }
+      }
+      // ── FIN CORRECCIÓN TOTALES REENVÍO ─────────────────────────────
+
       await ventaRef.set({
         'idVenta'       : ventaRef.id,
         'numeroVenta'   : numeroVenta,
@@ -319,7 +376,7 @@ class PedidoService {
         'idCliente'     : pedidoActual['idCliente'],
         'nombreCliente' : pedidoActual['nombreCliente'],
         'fechaVenta'    : FieldValue.serverTimestamp(),
-        'total'         : pedidoActual['total'],
+        'total'         : totalFinal,
         'registradoPor' : idAdmin,
         'año'           : DateTime.now().year,
         'mes'           : DateTime.now().month,

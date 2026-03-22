@@ -1,9 +1,4 @@
 // lib/services/backup_service.dart
-//
-// Sistema completo de backup:
-//  1. Backup manual  → descarga JSON al computador
-//  2. Backup automático → guarda en Firebase Storage (se ejecuta al abrir la sección)
-//  3. Restaurar → reescribe los datos en Firestore desde un backup guardado
 
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
@@ -20,7 +15,6 @@ class BackupService {
   final FirebaseStorage   _storage = FirebaseStorage.instance;
   final FirebaseAuth      _auth    = FirebaseAuth.instance;
 
-  // Colecciones que se respaldan — nombres exactos de tu Firestore
   static const _colecciones = [
     'pedido',
     'productos',
@@ -30,7 +24,7 @@ class BackupService {
   ];
 
   // ─────────────────────────────────────────────────────────────
-  // 1. EXPORTAR LOCAL — descarga JSON al computador del admin
+  // 1. EXPORTAR LOCAL
   // ─────────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> exportarLocal() async {
     try {
@@ -63,45 +57,67 @@ class BackupService {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // 2. BACKUP AUTOMÁTICO — guarda en Firebase Storage
-  //    Se llama al abrir la página. Mantiene las últimas 7 copias.
+  // 2. BACKUP AUTOMÁTICO
   // ─────────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> backupAutomatico() async {
+    final ahora = DateTime.now();
     try {
-      final uid       = _auth.currentUser?.uid ?? 'desconocido';
       final resultado = await _leerFirestore();
       final jsonStr   = _construirJson(resultado['datos'], resultado['totalDocs']);
-      final fecha     = DateFormat('yyyy-MM-dd_HH-mm-ss').format(DateTime.now());
-      final ruta      = 'backups/$uid/backup_$fecha.json';
+      final fechaStr  = DateFormat('yyyy-MM-dd_HH-mm-ss').format(ahora);
+      final ruta      = 'backups/sistema/backup_$fechaStr.json';
 
-      await _storage.ref().child(ruta).putData(
+      final uploadTask = await _storage.ref().child(ruta).putData(
         Uint8List.fromList(utf8.encode(jsonStr)),
         SettableMetadata(contentType: 'application/json'),
       );
 
-      await _limpiarBackupsViejos(uid);
+      final tamanoKB = ((uploadTask.metadata?.size ?? 0) / 1024).round();
+
+      // ✅ Registrar en Firestore para que el banner lo muestre
+      await _db.collection('sistema').doc('ultimoBackup').set({
+        'fecha':      Timestamp.fromDate(ahora),
+        'exito':      true,
+        'ruta':       ruta,
+        'totalDocs':  resultado['totalDocs'],
+        'tamanoKB':   tamanoKB,
+        'error':      null,
+      });
+
+      await _limpiarBackupsViejos();
 
       return {
-        'exito': true,
-        'ruta': ruta,
+        'exito':     true,
+        'ruta':      ruta,
         'totalDocs': resultado['totalDocs'],
-        'fecha': DateFormat('dd/MM/yyyy HH:mm').format(DateTime.now()),
+        'tamanoKB':  tamanoKB,
+        'fecha':     DateFormat('dd/MM/yyyy HH:mm').format(ahora),
       };
     } catch (e) {
+      // ✅ Registrar también el fallo en Firestore
+      await _db.collection('sistema').doc('ultimoBackup').set({
+        'fecha':     Timestamp.fromDate(ahora),
+        'exito':     false,
+        'error':     e.toString(),
+        'totalDocs': 0,
+        'tamanoKB':  0,
+      }).catchError((_) {});
       return {'exito': false, 'error': e.toString()};
     }
   }
 
   // ─────────────────────────────────────────────────────────────
-  // 3. LISTAR backups guardados en Storage
+  // 3. LISTAR backups en Storage
   // ─────────────────────────────────────────────────────────────
   Future<List<Map<String, dynamic>>> listarBackups() async {
     try {
-      final uid  = _auth.currentUser?.uid ?? 'desconocido';
-      final list = await _storage.ref().child('backups/$uid').listAll();
+      print('🔍 [BackupService] Listando backups en backups/sistema...');
+      final list = await _storage.ref().child('backups/sistema').listAll();
+      print('🔍 [BackupService] Archivos encontrados: ${list.items.length}');
 
       final backups = <Map<String, dynamic>>[];
       for (final item in list.items) {
+        print('🔍 [BackupService] Archivo: ${item.fullPath}');
         final meta = await item.getMetadata();
         backups.add({
           'nombre': item.name,
@@ -115,8 +131,10 @@ class BackupService {
       }
 
       backups.sort((a, b) => b['nombre'].compareTo(a['nombre']));
+      print('✅ [BackupService] Backups cargados: ${backups.length}');
       return backups;
-    } catch (_) {
+    } catch (e) {
+      print('❌ [BackupService] ERROR listarBackups: $e');
       return [];
     }
   }
@@ -135,43 +153,32 @@ class BackupService {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // 5. RESTAURAR desde archivo local subido por el admin
+  // 5. RESTAURAR desde archivo local
   // ─────────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> restaurarDesdeArchivo(Uint8List bytes) async {
-    // Validar archivo vacio
-    if (bytes.isEmpty) {
-      return {'exito': false, 'error': 'El archivo esta vacio'};
-    }
-    // Validar tamano minimo
-    if (bytes.length < 50) {
-      return {'exito': false, 'error': 'El archivo es demasiado pequeno para ser un backup valido'};
-    }
-    // Decodificar
+    if (bytes.isEmpty) return {'exito': false, 'error': 'El archivo esta vacio'};
+    if (bytes.length < 50) return {'exito': false, 'error': 'El archivo es demasiado pequeno'};
+
     String jsonStr;
     try {
       jsonStr = utf8.decode(bytes);
     } catch (_) {
       return {'exito': false, 'error': 'El archivo no es texto valido'};
     }
-    if (jsonStr.trim().isEmpty) {
-      return {'exito': false, 'error': 'El archivo esta vacio'};
-    }
-    // Validar estructura de backup
+    if (jsonStr.trim().isEmpty) return {'exito': false, 'error': 'El archivo esta vacio'};
+
     try {
       final decoded = jsonDecode(jsonStr) as Map<String, dynamic>;
       if (!decoded.containsKey('metadata') || !decoded.containsKey('datos')) {
         return {'exito': false, 'error': 'El archivo no es un backup valido — falta estructura'};
       }
-      if (decoded['datos'] is! Map) {
-        return {'exito': false, 'error': 'El archivo esta corrupto'};
-      }
+      if (decoded['datos'] is! Map) return {'exito': false, 'error': 'El archivo esta corrupto'};
       final totalDocs = (decoded['metadata']?['totalDocumentos'] ?? 0) as int;
-      if (totalDocs == 0) {
-        return {'exito': false, 'error': 'El backup no tiene documentos para restaurar'};
-      }
+      if (totalDocs == 0) return {'exito': false, 'error': 'El backup no tiene documentos'};
     } catch (_) {
-      return {'exito': false, 'error': 'El archivo no es un JSON valido — puede estar corrupto'};
+      return {'exito': false, 'error': 'El archivo no es un JSON valido'};
     }
+
     try {
       return _restaurar(jsonStr);
     } catch (e) {
@@ -195,7 +202,7 @@ class BackupService {
           totalDocs++;
         }
       } catch (_) {
-        datos[col] = {}; // colección sin permisos o vacía, se omite
+        datos[col] = {};
       }
     }
     return {'datos': datos, 'totalDocs': totalDocs};
@@ -233,24 +240,24 @@ class BackupService {
         }
       }
 
-      return {
-        'exito': true,
-        'restaurados': restaurados,
-        'errores': errores,
-      };
+      return {'exito': true, 'restaurados': restaurados, 'errores': errores};
     } catch (e) {
       return {'exito': false, 'error': 'JSON inválido: ${e.toString()}'};
     }
   }
 
-  Future<void> _limpiarBackupsViejos(String uid) async {
+  Future<void> _limpiarBackupsViejos() async {
     try {
-      final list = await _storage.ref().child('backups/$uid').listAll();
-      if (list.items.length <= 7) return;
-      final ordenados = list.items.toList()
-        ..sort((a, b) => a.name.compareTo(b.name));
-      for (final item in ordenados.take(list.items.length - 7)) {
-        await item.delete();
+      final list   = await _storage.ref().child('backups/sistema').listAll();
+      final limite = DateTime.now().subtract(const Duration(days: 30));
+
+      for (final item in list.items) {
+        try {
+          final meta = await item.getMetadata();
+          if (meta.timeCreated != null && meta.timeCreated!.isBefore(limite)) {
+            await item.delete();
+          }
+        } catch (_) {}
       }
     } catch (_) {}
   }

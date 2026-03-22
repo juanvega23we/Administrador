@@ -6,6 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../productos/productos_page.dart';
 import '../../utils/numero_formato.dart';
 import '../pedidos/pedidos_page.dart';
+import '../devoluciones/devoluciones_page.dart';
 import '../reportes/reportes_page.dart';
 import '../super_admin/backup_page.dart';
 import '../../services/auth_admin_service.dart';
@@ -32,23 +33,55 @@ class _DashboardPageState extends State<DashboardPage>
 
   late AnimationController _fadeController;
   late Animation<double> _fadeAnimation;
+  late Stream<Map<String, dynamic>> _estadisticasStream;
 
   bool get _esSuperAdmin => widget.adminData['rol'] == 'super_admin';
+
+  // Cache de productos para no re-consultar en cada update
+  int? _productosActivosCache;
 
   @override
   void initState() {
     super.initState();
+    _estadisticasStream = _getEstadisticasStream();
     _fadeController = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 700))
       ..forward();
     _fadeAnimation =
         CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
+    // Cargar productos una sola vez al iniciar
+    _cargarProductosActivos();
   }
 
   @override
   void dispose() {
     _fadeController.dispose();
     super.dispose();
+  }
+
+  // Productos se cargan una sola vez, no en cada snapshot
+  Future<void> _cargarProductosActivos() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('productos')
+          .where('activo', isEqualTo: true)
+          .count()
+          .get();
+      if (mounted) {
+        setState(() => _productosActivosCache = snap.count ?? 0);
+      }
+    } catch (_) {
+      // Fallback: contar sin filtro
+      try {
+        final snap = await FirebaseFirestore.instance
+            .collection('productos')
+            .count()
+            .get();
+        if (mounted) {
+          setState(() => _productosActivosCache = snap.count ?? 0);
+        }
+      } catch (_) {}
+    }
   }
 
   Color _colorEstado(String? estado) {
@@ -72,65 +105,46 @@ class _DashboardPageState extends State<DashboardPage>
     return '${now.day} de ${meses[now.month - 1]}, ${now.year}';
   }
 
+  // Solo pedidos de HOY sin límite — el volumen diario es siempre manejable
   Stream<Map<String, dynamic>> _getEstadisticasStream() {
     final hoy = DateTime.now();
     final inicioDia = DateTime(hoy.year, hoy.month, hoy.day);
+
     return FirebaseFirestore.instance
         .collection('pedido')
+        .where('fechaPedido',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(inicioDia))
+        .orderBy('fechaPedido', descending: true)
         .snapshots()
-        .asyncMap((snapshot) async {
-      int pedidosHoy = 0;
-      double ventasHoy = 0;
+        .map((snapshot) {
+      int pedidosHoy        = 0;
+      double ventasHoy      = 0;
       int pedidosPendientes = 0;
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
+
+      for (final doc in snapshot.docs) {
+        final data   = doc.data();
         final estado = data['estado']?.toString() ?? '';
-        Timestamp? ts;
-        final raw = data['fechaPedido'] ?? data['creadoEn'] ?? data['fecha'];
-        if (raw is Timestamp) ts = raw;
-        if (ts != null && !ts.toDate().isBefore(inicioDia)) {
-          pedidosHoy++;
-          if (estado == 'confirmado' || estado == 'entregado') {
+        pedidosHoy++;
+        if (estado == 'entregado') {
+          // Para pedidos con reenvío usar totalPrimeraEntrega + totalReenvio si existen
+          if (data['esReenvio'] == true &&
+              data['totalPrimeraEntrega'] != null &&
+              data['totalReenvio'] != null) {
+            ventasHoy += (data['totalPrimeraEntrega'] as num).toDouble() +
+                         (data['totalReenvio'] as num).toDouble();
+          } else {
             ventasHoy += ((data['total'] as num?) ?? 0.0).toDouble();
           }
         }
         if (estado == 'pendiente') pedidosPendientes++;
       }
-      int productosActivos = 0;
-      try {
-        final s1 = await FirebaseFirestore.instance
-            .collection('productos')
-            .where('activo', isEqualTo: true)
-            .get();
-        if (s1.docs.isNotEmpty) {
-          productosActivos = s1.docs.length;
-        } else {
-          final s2 = await FirebaseFirestore.instance
-              .collection('producto')
-              .where('activo', isEqualTo: true)
-              .get();
-          if (s2.docs.isNotEmpty) {
-            productosActivos = s2.docs.length;
-          } else {
-            final s3 = await FirebaseFirestore.instance
-                .collection('productos')
-                .get();
-            if (s3.docs.isNotEmpty) {
-              productosActivos = s3.docs.length;
-            } else {
-              final s4 = await FirebaseFirestore.instance
-                  .collection('producto')
-                  .get();
-              productosActivos = s4.docs.length;
-            }
-          }
-        }
-      } catch (_) {}
+
       return {
-        'pedidosHoy': pedidosHoy,
-        'ventasHoy': ventasHoy,
+        'pedidosHoy':        pedidosHoy,
+        'ventasHoy':         ventasHoy,
         'pedidosPendientes': pedidosPendientes,
-        'productosActivos': productosActivos,
+        // Usa el cache en lugar de hacer query extra
+        'productosActivos':  _productosActivosCache ?? 0,
       };
     });
   }
@@ -141,6 +155,7 @@ class _DashboardPageState extends State<DashboardPage>
       _buildDashboardContent(),
       const ProductosPage(),
       const PedidosPage(),
+      const DevolucionesPage(),
       const ReportesPage(),
       if (_esSuperAdmin) const BackupPage(),
       if (_esSuperAdmin) const SuperAdminPage(),
@@ -182,9 +197,7 @@ class _DashboardPageState extends State<DashboardPage>
       color: const Color(0xFFF5FAF7),
       child: Column(
         children: [
-          DashboardHeader(
-            fechaActual: _obtenerFechaActual(),
-          ),
+          DashboardHeader(fechaActual: _obtenerFechaActual()),
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(28),
@@ -192,11 +205,14 @@ class _DashboardPageState extends State<DashboardPage>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   DashboardWelcomeBanner(
-                    nombreAdmin: widget.adminData['nombre'] ?? 'Admin',
+                    nombreAdmin: _esSuperAdmin
+                        ? 'Super Administrador'
+                        : widget.adminData['nombre'] ?? 'Admin',
+                    subtitulo: _esSuperAdmin ? null : 'Administrador',
                   ),
                   const SizedBox(height: 28),
                   DashboardStatsSection(
-                    estadisticasStream: _getEstadisticasStream(),
+                    estadisticasStream: _estadisticasStream,
                     formatNum: formatearNumeroCorto,
                   ),
                   const SizedBox(height: 32),
@@ -276,8 +292,7 @@ class _DashboardPageState extends State<DashboardPage>
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10)),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             ),
           ),
         ],
@@ -292,8 +307,7 @@ class _DashboardPageState extends State<DashboardPage>
         barrierDismissible: false,
         builder: (_) => Center(
           child: Card(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             child: const Padding(
               padding: EdgeInsets.all(24),
               child: Column(

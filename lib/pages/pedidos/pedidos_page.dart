@@ -22,11 +22,20 @@ class _PedidosPageState extends State<PedidosPage> {
   DateTime? _fechaInicio;
   DateTime? _fechaFin;
   bool      _searchExpanded = false;
+  String?   _filtroEspecial; // 'reembolso' | 'cancelado' | 'reenvio'
 
   final TextEditingController _searchController = TextEditingController();
   final FocusNode             _searchFocus      = FocusNode();
 
+  late Stream<QuerySnapshot> _pedidosStream;
+
   static const Color _teal = Color(0xFF00897B);
+
+  @override
+  void initState() {
+    super.initState();
+    _pedidosStream = _getPedidosStream();
+  }
 
   @override
   void dispose() {
@@ -71,23 +80,27 @@ class _PedidosPageState extends State<PedidosPage> {
       setState(() {
         if (esInicio) _fechaInicio = picked;
         else _fechaFin = picked;
+        _pedidosStream = _getPedidosStream();
       });
     }
   }
 
   void _limpiarFiltros() {
     setState(() {
-      _fechaInicio   = null;
-      _fechaFin      = null;
-      _textoBusqueda = '';
+      _fechaInicio    = null;
+      _fechaFin       = null;
+      _textoBusqueda  = '';
+      _filtroEspecial = null;
       _searchController.clear();
+      _pedidosStream = _getPedidosStream();
     });
   }
 
   bool get _hayFiltrosActivos =>
-      _fechaInicio != null ||
-      _fechaFin    != null ||
-      _textoBusqueda.isNotEmpty;
+      _fechaInicio    != null ||
+      _fechaFin       != null ||
+      _textoBusqueda.isNotEmpty ||
+      _filtroEspecial != null;
 
   Timestamp? _safeTimestamp(dynamic value) {
     if (value is Timestamp) return value;
@@ -124,24 +137,61 @@ class _PedidosPageState extends State<PedidosPage> {
         if (fecha.isAfter(finDia)) return false;
       }
     }
+    // ── Filtro especial ──────────────────────────────────────
+    if (_filtroEspecial != null) {
+      switch (_filtroEspecial) {
+        case 'reembolso':
+          // Pedidos con devolución y resolución reembolso
+          if (data['ultimaDevolucionRes'] != 'reembolso') return false;
+          break;
+        case 'cancelado':
+          // Todos los pedidos cancelados
+          if (data['estado'] != 'cancelado') return false;
+          break;
+        case 'reenvio':
+          // Pedidos con devolución y resolución reenvío
+          if (data['ultimaDevolucionRes'] != 'reenvio') return false;
+          break;
+      }
+    }
     return true;
   }
 
   Stream<QuerySnapshot> _getPedidosStream() {
-    if (_filtroEstado == 'todos') {
-      return FirebaseFirestore.instance.collection('pedido').snapshots();
+    // Límite de 150 pedidos — suficiente para operación diaria
+    // El filtro de fecha reduce esto aún más cuando está activo
+    const limite = 150;
+
+    if (_filtroEstado != 'todos') {
+      return FirebaseFirestore.instance
+          .collection('pedido')
+          .where('estado', isEqualTo: _filtroEstado)
+          .orderBy('fechaPedido', descending: true)
+          .limit(limite)
+          .snapshots();
     }
+
+    if (_fechaInicio != null) {
+      return FirebaseFirestore.instance
+          .collection('pedido')
+          .where('fechaPedido',
+              isGreaterThanOrEqualTo: Timestamp.fromDate(DateTime(
+                  _fechaInicio!.year, _fechaInicio!.month, _fechaInicio!.day)))
+          .orderBy('fechaPedido', descending: true)
+          .limit(limite)
+          .snapshots();
+    }
+
     return FirebaseFirestore.instance
         .collection('pedido')
-        .where('estado', isEqualTo: _filtroEstado)
+        .orderBy('fechaPedido', descending: true)
+        .limit(limite)
         .snapshots();
   }
 
-  // ── Descontar stock de los productos del pedido ──────────────
-  // Solo descuenta los que NO están marcados como omitido:true
+  // ── Descontar stock ──────────────────────────────────────────
   Future<void> _descontarStock(String docId, Map<String, dynamic> pedido) async {
     try {
-      // Buscar detalles del pedido
       final idPedidoBusqueda = _resolverIdPedido(docId, pedido);
 
       QuerySnapshot detallesSnap = await FirebaseFirestore.instance
@@ -149,7 +199,6 @@ class _PedidosPageState extends State<PedidosPage> {
           .where('idPedido', isEqualTo: idPedidoBusqueda)
           .get();
 
-      // Fallback por numeroPedido
       if (detallesSnap.docs.isEmpty) {
         final numeroPedido = pedido['numeroPedido']?.toString() ?? '';
         if (numeroPedido.isNotEmpty && numeroPedido != idPedidoBusqueda) {
@@ -160,7 +209,6 @@ class _PedidosPageState extends State<PedidosPage> {
         }
       }
 
-      // Fallback por items embebidos
       List<Map<String, dynamic>> items = [];
       if (detallesSnap.docs.isNotEmpty) {
         items = detallesSnap.docs.map((d) => d.data() as Map<String, dynamic>).toList();
@@ -171,23 +219,19 @@ class _PedidosPageState extends State<PedidosPage> {
 
       if (items.isEmpty) return;
 
-      // Descontar stock producto por producto (ignorar omitidos)
       for (final item in items) {
-        // Si el producto fue omitido por falta de stock, no descontar
-        if (item['omitido'] == true) continue;
-
+        if (item['omitido']     == true) continue;
+        if (item['yaEntregado'] == true) continue;
+        if (item['devuelto']    == true) continue;
         final idProducto = (item['idProducto'] ?? item['id'])?.toString();
         if (idProducto == null || idProducto.isEmpty) continue;
-
         final cantidad = (item['cantidad'] as num?)?.toInt() ?? 0;
         if (cantidad <= 0) continue;
 
         await FirebaseFirestore.instance
             .collection('productos')
             .doc(idProducto)
-            .update({
-          'stock': FieldValue.increment(-cantidad),
-        });
+            .update({'stock': FieldValue.increment(-cantidad)});
       }
     } catch (e) {
       debugPrint('❌ Error al descontar stock: $e');
@@ -201,7 +245,49 @@ class _PedidosPageState extends State<PedidosPage> {
     return pedido['numeroPedido']?.toString() ?? '';
   }
 
-  // ── Actualizar estado + descontar stock + registrar venta ────
+  // ── Marcar cantidadReenviada cuando un reenvío queda entregado ──
+  Future<void> _marcarReenviados(String docId, Map<String, dynamic> pedido) async {
+    try {
+      // Solo aplica si este pedido era un reenvío (esReenvio == true)
+      if (pedido['esReenvio'] != true) return;
+
+      final idPedidoBusqueda = _resolverIdPedido(docId, pedido);
+
+      final detallesSnap = await FirebaseFirestore.instance
+          .collection('detalle_pedido')
+          .where('idPedido', isEqualTo: idPedidoBusqueda)
+          .get();
+
+      final batch = FirebaseFirestore.instance.batch();
+
+      for (final doc in detallesSnap.docs) {
+        final data   = doc.data();
+        if (data['yaEntregado'] == true) continue;
+        if (data['devuelto']    == true) continue;
+        if (data['omitido']     == true) continue;
+        final cantidad = (data['cantidad'] as num?)?.toInt() ?? 0;
+        if (cantidad <= 0) continue;
+
+        // cantidadReenviada = lo que realmente se debía reenviar
+        // = cantidadDevuelta (lo devuelto originalmente), no la cantidad actual
+        // que el admin pudo haber cambiado en el sheet de edición
+        final cantDevuelta  = (data['cantidadDevuelta']  as num?)?.toInt() ?? 0;
+        final cantOriginal  = (data['cantidadOriginal']  as num?)?.toInt() ?? 0;
+        // Si tiene cantidadDevuelta guardada, eso es lo reenviado
+        // Si no, usar la cantidad actual (producto nuevo del reenvío)
+        final cantReenviada = cantDevuelta > 0 ? cantDevuelta : cantidad;
+
+        batch.update(doc.reference, {
+          'cantidadReenviada': cantReenviada,
+        });
+      }
+
+      await batch.commit();
+    } catch (e) {
+      debugPrint('❌ Error al marcar reenviados: $e');
+    }
+  }
+
   Future<void> _actualizarEstado(
     String docId,
     Map<String, dynamic> pedido,
@@ -215,28 +301,93 @@ class _PedidosPageState extends State<PedidosPage> {
       'fechaActualizacion': FieldValue.serverTimestamp(),
     });
 
-    // ── Al confirmar → descontar stock ───────────────────────
     if (nuevoEstado == 'confirmado') {
-      await _descontarStock(docId, pedido);
+      // El stock lo descuenta automáticamente la Cloud Function onPedidoUpdated
+      // al detectar el cambio de estado pendiente → confirmado
     }
 
-    // ── Al entregar → registrar como venta ───────────────────
+    double totalFinal = (pedido['total'] as num?)?.toDouble() ?? 0.0;
+
     if (nuevoEstado == 'entregado') {
+      // Si era un reenvío, marcar cantidadReenviada en detalle_pedido
+      await _marcarReenviados(docId, pedido);
+
+      // Recalcular total real: suma de todos los productos activos
+      // (yaEntregados + nuevos del reenvío), excluyendo devueltos y omitidos
+      double totalFinal = 0;
+      try {
+        final detalleSnap = await FirebaseFirestore.instance
+            .collection('detalle_pedido')
+            .where('idPedido', isEqualTo: docId)
+            .get();
+        for (final doc in detalleSnap.docs) {
+          final data = doc.data();
+          if (data['devuelto']          == true) continue;
+          if (data['canceladoDelReenvio'] == true) continue;
+          if (data['omitido'] == true &&
+              data['yaEntregado'] != true) continue;
+
+          final precio       = (data['precioUnitario']  as num?)?.toDouble() ?? 0;
+          final cantDevuelta = (data['cantidadDevuelta'] as num?)?.toInt()   ?? 0;
+
+          if (data['yaEntregado'] == true) {
+            final cant = (data['cantidad'] as num?)?.toDouble() ?? 0;
+            totalFinal += cant * precio;
+          } else if (cantDevuelta > 0) {
+            final cantOriginal  = (data['cantidadOriginal']  as num?)?.toDouble() ?? 0;
+            final cantReenviada = (data['cantidadReenviada'] as num?)?.toDouble() ?? 0;
+            final cantEntregada = cantOriginal - cantDevuelta;
+            totalFinal += (cantEntregada + cantReenviada) * precio;
+          } else {
+            final cant = (data['cantidad'] as num?)?.toDouble() ?? 0;
+            totalFinal += cant * precio;
+          }
+        }
+
+        // Actualizar total en pedido
+        await FirebaseFirestore.instance
+            .collection('pedido')
+            .doc(docId)
+            .update({'total': totalFinal});
+
+        // Actualizar también en venta si ya existe
+        final ventaSnap = await FirebaseFirestore.instance
+            .collection('venta')
+            .where('idPedido', isEqualTo: docId)
+            .get();
+        if (ventaSnap.docs.isNotEmpty) {
+          await ventaSnap.docs.first.reference.update({'total': totalFinal});
+        }
+
+      } catch (e) {
+        debugPrint('❌ Error recalculando total: $e');
+      }
+
+      // Crear o actualizar venta
       final ahora    = DateTime.now();
-      final ventaRef = FirebaseFirestore.instance.collection('venta').doc();
-      await ventaRef.set({
-        'idVenta'      : ventaRef.id,
-        'idPedido'     : docId,
-        'numeroPedido' : pedido['numeroPedido'] ?? '',
-        'idCliente'    : pedido['idCliente'] ?? pedido['uid'] ?? '',
-        'nombreCliente': _getNombreCliente(pedido),
-        'total'        : pedido['total'] ?? 0.0,
-        'metodoPago'   : pedido['metodoPago'] ?? 'efectivo',
-        'fechaVenta'   : FieldValue.serverTimestamp(),
-        'año'          : ahora.year,
-        'mes'          : ahora.month,
-        'dia'          : ahora.day,
-      });
+      // Buscar si ya existe venta para este pedido
+      final ventaExistente = await FirebaseFirestore.instance
+          .collection('venta')
+          .where('idPedido', isEqualTo: docId)
+          .get();
+
+      if (ventaExistente.docs.isEmpty) {
+        // Crear nueva venta
+        final ventaRef = FirebaseFirestore.instance.collection('venta').doc();
+        await ventaRef.set({
+          'idVenta'      : ventaRef.id,
+          'idPedido'     : docId,
+          'numeroPedido' : pedido['numeroPedido'] ?? '',
+          'idCliente'    : pedido['idCliente'] ?? pedido['uid'] ?? '',
+          'nombreCliente': _getNombreCliente(pedido),
+          'total'        : totalFinal > 0 ? totalFinal : (pedido['total'] ?? 0.0),
+          'metodoPago'   : pedido['metodoPago'] ?? 'efectivo',
+          'fechaVenta'   : FieldValue.serverTimestamp(),
+          'año'          : ahora.year,
+          'mes'          : ahora.month,
+          'dia'          : ahora.day,
+        });
+      }
     }
 
     if (mounted) {
@@ -244,16 +395,91 @@ class _PedidosPageState extends State<PedidosPage> {
         context,
         mensaje: nuevoEstado == 'confirmado'
             ? 'Pedido confirmado y stock descontado correctamente'
-            : nuevoEstado == 'entregado'
-                ? 'Pedido marcado como entregado y registrado como venta'
-                : nuevoEstado == 'cancelado'
-                    ? 'Pedido cancelado correctamente'
-                    : 'Estado actualizado a: $nuevoEstado',
+            : nuevoEstado == 'despachado'
+                ? 'Pedido marcado como despachado'
+                : nuevoEstado == 'entregado'
+                    ? 'Pedido marcado como entregado y registrado como venta'
+                    : nuevoEstado == 'cancelado'
+                        ? 'Pedido cancelado correctamente'
+                        : 'Estado actualizado a: $nuevoEstado',
         tipo: nuevoEstado == 'cancelado'
             ? TipoNotificacion.error
             : TipoNotificacion.exito,
       );
     }
+  }
+
+  void _mostrarMenuFiltroEspecial(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModal) => Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Filtrar por tipo',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              _FiltroOpcion(
+                icon: Icons.currency_exchange,
+                label: 'Reembolsos',
+                descripcion: 'Pedidos con devolución y reembolso al cliente',
+                color: Colors.blue,
+                activo: _filtroEspecial == 'reembolso',
+                onTap: () {
+                  setState(() => _filtroEspecial =
+                      _filtroEspecial == 'reembolso' ? null : 'reembolso');
+                  Navigator.pop(ctx);
+                },
+              ),
+              const SizedBox(height: 10),
+              _FiltroOpcion(
+                icon: Icons.cancel_outlined,
+                label: 'Cancelados',
+                descripcion: 'Todos los pedidos cancelados',
+                color: Colors.red,
+                activo: _filtroEspecial == 'cancelado',
+                onTap: () {
+                  setState(() => _filtroEspecial =
+                      _filtroEspecial == 'cancelado' ? null : 'cancelado');
+                  Navigator.pop(ctx);
+                },
+              ),
+              const SizedBox(height: 10),
+              _FiltroOpcion(
+                icon: Icons.replay_outlined,
+                label: 'Reenvíos',
+                descripcion: 'Pedidos con devolución y reenvío del producto',
+                color: Colors.orange,
+                activo: _filtroEspecial == 'reenvio',
+                onTap: () {
+                  setState(() => _filtroEspecial =
+                      _filtroEspecial == 'reenvio' ? null : 'reenvio');
+                  Navigator.pop(ctx);
+                },
+              ),
+              const SizedBox(height: 16),
+              if (_filtroEspecial != null)
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () {
+                      setState(() => _filtroEspecial = null);
+                      Navigator.pop(ctx);
+                    },
+                    child: const Text('Quitar filtro'),
+                  ),
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _mostrarMenuFechas(BuildContext context) {
@@ -360,19 +586,29 @@ class _PedidosPageState extends State<PedidosPage> {
                         children: [
                           _IconBtn(
                             icon: Icons.search,
+                            tooltip: 'Buscar pedido',
                             isActive: false,
                             onTap: _toggleSearch,
                           ),
                           const SizedBox(width: 8),
                           _IconBtn(
                             icon: Icons.calendar_month,
+                            tooltip: 'Filtrar por fecha',
                             isActive: _fechaInicio != null || _fechaFin != null,
                             onTap: () => _mostrarMenuFechas(context),
+                          ),
+                          const SizedBox(width: 8),
+                          _IconBtn(
+                            icon: Icons.filter_list,
+                            tooltip: 'Filtrar por tipo',
+                            isActive: _filtroEspecial != null,
+                            onTap: () => _mostrarMenuFiltroEspecial(context),
                           ),
                           if (_hayFiltrosActivos) ...[
                             const SizedBox(width: 8),
                             _IconBtn(
                               icon: Icons.filter_alt_off,
+                              tooltip: 'Limpiar filtros',
                               isActive: false,
                               color: Colors.red,
                               onTap: _limpiarFiltros,
@@ -382,6 +618,25 @@ class _PedidosPageState extends State<PedidosPage> {
                       ),
                     ],
                   ),
+                if (_filtroEspecial != null) ...[
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    const Icon(Icons.filter_list, size: 14, color: _teal),
+                    const SizedBox(width: 6),
+                    Text(
+                      _filtroEspecial == 'reembolso'
+                          ? 'Filtro: Reembolsos'
+                          : _filtroEspecial == 'cancelado'
+                              ? 'Filtro: Cancelados'
+                              : 'Filtro: Reenvíos',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: _teal,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ]),
+                ],
                 if (_fechaInicio != null || _fechaFin != null) ...[
                   const SizedBox(height: 8),
                   Row(
@@ -418,31 +673,39 @@ class _PedidosPageState extends State<PedidosPage> {
                   icon: Icons.list_alt,
                   color: _teal,
                   isSelected: _filtroEstado == 'todos',
-                  onTap: () => setState(() => _filtroEstado = 'todos'),
+                  onTap: () => setState(() { _filtroEstado = 'todos'; _pedidosStream = _getPedidosStream(); }),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 PedidoEstadoTab(
                   label: 'Pendientes',
                   icon: Icons.hourglass_empty,
                   color: Colors.orange,
                   isSelected: _filtroEstado == 'pendiente',
-                  onTap: () => setState(() => _filtroEstado = 'pendiente'),
+                  onTap: () => setState(() { _filtroEstado = 'pendiente'; _pedidosStream = _getPedidosStream(); }),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 PedidoEstadoTab(
                   label: 'Confirmados',
                   icon: Icons.check_circle_outline,
                   color: Colors.blue,
                   isSelected: _filtroEstado == 'confirmado',
-                  onTap: () => setState(() => _filtroEstado = 'confirmado'),
+                  onTap: () => setState(() { _filtroEstado = 'confirmado'; _pedidosStream = _getPedidosStream(); }),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
+                PedidoEstadoTab(
+                  label: 'Despachados',
+                  icon: Icons.local_shipping,
+                  color: Colors.purple,
+                  isSelected: _filtroEstado == 'despachado',
+                  onTap: () => setState(() { _filtroEstado = 'despachado'; _pedidosStream = _getPedidosStream(); }),
+                ),
+                const SizedBox(width: 8),
                 PedidoEstadoTab(
                   label: 'Entregados',
                   icon: Icons.done_all,
                   color: Colors.green,
                   isSelected: _filtroEstado == 'entregado',
-                  onTap: () => setState(() => _filtroEstado = 'entregado'),
+                  onTap: () => setState(() { _filtroEstado = 'entregado'; _pedidosStream = _getPedidosStream(); }),
                 ),
               ],
             ),
@@ -451,7 +714,7 @@ class _PedidosPageState extends State<PedidosPage> {
 
           Expanded(
             child: StreamBuilder<QuerySnapshot>(
-              stream: _getPedidosStream(),
+              stream: _pedidosStream,
               builder: (context, snapshot) {
                 if (snapshot.hasError) {
                   return Center(child: Text('Error: ${snapshot.error}'));
@@ -460,22 +723,23 @@ class _PedidosPageState extends State<PedidosPage> {
                   return const Center(child: CircularProgressIndicator());
                 }
 
-                final docs = snapshot.data!.docs.toList();
-                docs.sort((a, b) {
-                  final da  = a.data() as Map<String, dynamic>;
-                  final db  = b.data() as Map<String, dynamic>;
-                  final tsA = _safeTimestamp(da['fechaPedido'] ?? da['creadoEn']);
-                  final tsB = _safeTimestamp(db['fechaPedido'] ?? db['creadoEn']);
-                  if (tsA == null && tsB == null) return 0;
-                  if (tsA == null) return 1;
-                  if (tsB == null) return -1;
-                  return tsB.compareTo(tsA);
-                });
-
-                final pedidos = docs.where((doc) {
+                var pedidos = snapshot.data!.docs.where((doc) {
                   final data = doc.data() as Map<String, dynamic>;
                   return _pedidoCoincide(data);
                 }).toList();
+
+                if (_filtroEstado != 'todos') {
+                  pedidos.sort((a, b) {
+                    final dataA = a.data() as Map<String, dynamic>;
+                    final dataB = b.data() as Map<String, dynamic>;
+                    final tsA = dataA['fechaPedido'];
+                    final tsB = dataB['fechaPedido'];
+                    if (tsA == null && tsB == null) return 0;
+                    if (tsA == null) return 1;
+                    if (tsB == null) return -1;
+                    return (tsB as Timestamp).compareTo(tsA as Timestamp);
+                  });
+                }
 
                 if (pedidos.isEmpty) {
                   return Center(
@@ -503,11 +767,14 @@ class _PedidosPageState extends State<PedidosPage> {
 
                 return ListView.builder(
                   padding: const EdgeInsets.all(24),
+                  cacheExtent: 500,
+                  addRepaintBoundaries: true,
                   itemCount: pedidos.length,
                   itemBuilder: (context, index) {
                     final doc  = pedidos[index];
                     final data = doc.data() as Map<String, dynamic>;
                     return PedidoCard(
+                      key: ValueKey(doc.id),
                       docId: doc.id,
                       pedido: data,
                       onEstadoChanged: (nuevoEstado) =>
@@ -549,11 +816,14 @@ class _SearchBar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: onClose,
-            child: const SizedBox(
-              width: 42, height: 42,
-              child: Icon(Icons.close, color: Color(0xFF00897B), size: 20),
+          Tooltip(
+            message: 'Cerrar búsqueda',
+            child: GestureDetector(
+              onTap: onClose,
+              child: const SizedBox(
+                width: 42, height: 42,
+                child: Icon(Icons.close, color: Color(0xFF00897B), size: 20),
+              ),
             ),
           ),
           Expanded(
@@ -581,17 +851,19 @@ class _IconBtn extends StatelessWidget {
   final bool isActive;
   final Color color;
   final VoidCallback onTap;
+  final String? tooltip;
 
   const _IconBtn({
     required this.icon,
     required this.isActive,
     this.color = const Color(0xFF00897B),
     required this.onTap,
+    this.tooltip,
   });
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
+    Widget child = InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(21),
       child: AnimatedContainer(
@@ -606,6 +878,80 @@ class _IconBtn extends StatelessWidget {
               color: isActive ? color : Colors.transparent, width: 2),
         ),
         child: Icon(icon, color: color, size: 20),
+      ),
+    );
+
+    if (tooltip != null) {
+      child = Tooltip(
+        message: tooltip!,
+        child: child,
+      );
+    }
+
+    return child;
+  }
+}
+
+// ── Widget opción de filtro especial ──────────────────────────
+class _FiltroOpcion extends StatelessWidget {
+  final IconData icon;
+  final String   label;
+  final String   descripcion;
+  final Color    color;
+  final bool     activo;
+  final VoidCallback onTap;
+
+  const _FiltroOpcion({
+    required this.icon,
+    required this.label,
+    required this.descripcion,
+    required this.color,
+    required this.activo,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: activo ? color.withOpacity(0.08) : Colors.grey[50],
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: activo ? color : Colors.grey[200]!,
+            width: activo ? 2 : 1,
+          ),
+        ),
+        child: Row(children: [
+          Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: color, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    color: activo ? color : Colors.black87,
+                  )),
+              Text(descripcion,
+                  style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+            ],
+          )),
+          if (activo)
+            Icon(Icons.check_circle, color: color, size: 20),
+        ]),
       ),
     );
   }

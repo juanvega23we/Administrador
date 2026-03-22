@@ -8,6 +8,7 @@ class ProductoModel {
   final String  id;
   final String  nombre;
   final double  precio;
+  final double  precioProveedor; // Solo visible para administrador
   final String  categoria;
   final String  subtexto;
   final String  imagen;
@@ -20,6 +21,7 @@ class ProductoModel {
     required this.id,
     required this.nombre,
     required this.precio,
+    this.precioProveedor = 0.0,
     required this.categoria,
     required this.subtexto,
     required this.imagen,
@@ -33,10 +35,11 @@ class ProductoModel {
   factory ProductoModel.fromFirestore(
       Map<String, dynamic> data, String docId) {
     return ProductoModel(
-      id:        docId,
-      nombre:    data['nombre']?.toString()    ?? 'Sin nombre',
-      precio:    (data['precio'] as num?)?.toDouble() ?? 0.0,
-      categoria: data['categoria']?.toString() ?? '',
+      id:              docId,
+      nombre:          data['nombre']?.toString()    ?? 'Sin nombre',
+      precio:          (data['precio'] as num?)?.toDouble() ?? 0.0,
+      precioProveedor: (data['precioProveedor'] as num?)?.toDouble() ?? 0.0,
+      categoria:       data['categoria']?.toString() ?? '',
       subtexto:  data['subtexto']?.toString()  ?? '',
       imagen:    data['imagen']?.toString()     ?? '',
       stock:     (data['stock'] as num?)?.toInt() ?? 0,
@@ -50,9 +53,10 @@ class ProductoModel {
 
   /// Convierte a Map para guardar en Firestore
   Map<String, dynamic> toMap() => {
-        'nombre'    : nombre,
-        'precio'    : precio,
-        'categoria' : categoria,
+        'nombre'          : nombre,
+        'precio'          : precio,
+        'precioProveedor' : precioProveedor,
+        'categoria'       : categoria,
         'subtexto'  : subtexto,
         'imagen'    : imagen,
         'stock'     : stock,
@@ -65,6 +69,7 @@ class ProductoModel {
   ProductoModel copyWith({
     String? nombre,
     double? precio,
+    double? precioProveedor,
     String? categoria,
     String? subtexto,
     String? imagen,
@@ -72,29 +77,29 @@ class ProductoModel {
     bool?   activo,
   }) =>
       ProductoModel(
-        id:        id,
-        nombre:    nombre    ?? this.nombre,
-        precio:    precio    ?? this.precio,
-        categoria: categoria ?? this.categoria,
-        subtexto:  subtexto  ?? this.subtexto,
-        imagen:    imagen    ?? this.imagen,
-        stock:     stock     ?? this.stock,
-        activo:    activo    ?? this.activo,
-        idAdmin:   idAdmin,
-        creadoEn:  creadoEn,
+        id:              id,
+        nombre:          nombre          ?? this.nombre,
+        precio:          precio          ?? this.precio,
+        precioProveedor: precioProveedor ?? this.precioProveedor,
+        categoria:       categoria       ?? this.categoria,
+        subtexto:        subtexto        ?? this.subtexto,
+        imagen:          imagen          ?? this.imagen,
+        stock:           stock           ?? this.stock,
+        activo:          activo          ?? this.activo,
+        idAdmin:         idAdmin,
+        creadoEn:        creadoEn,
       );
 
-  /// Convierte a Map<String, dynamic> para compatibilidad con
-  /// los widgets existentes que reciben Map en lugar del modelo.
   Map<String, dynamic> toDisplayMap() => {
-        'id'        : id,
-        'nombre'    : nombre,
-        'precio'    : precio,
-        'categoria' : categoria,
-        'subtexto'  : subtexto,
-        'imagen'    : imagen,
-        'stock'     : stock,
-        'activo'    : activo,
-        'idAdmin'   : idAdmin,
+        'id'              : id,
+        'nombre'          : nombre,
+        'precio'          : precio,
+        'precioProveedor' : precioProveedor,
+        'categoria'       : categoria,
+        'subtexto'        : subtexto,
+        'imagen'          : imagen,
+        'stock'           : stock,
+        'activo'          : activo,
+        'idAdmin'         : idAdmin,
       };
 }

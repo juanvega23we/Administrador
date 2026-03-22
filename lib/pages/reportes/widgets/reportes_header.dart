@@ -1,8 +1,4 @@
-// lib/pages/reportes/widgets/reportes_header.dart
-//
-// Contiene todos los widgets de soporte del header:
-//   ExportBtn, HeaderIconBtn, PeriodChip, FechaTile, SectionHeader
-//
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -108,9 +104,7 @@ class HeaderIconBtn extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  Chip de período  (igual al original, color rojo→verde)
-// ═══════════════════════════════════════════════════════════════
+
 class PeriodChip extends StatelessWidget {
   final String   label;
   final bool     isSelected;
@@ -208,9 +202,6 @@ class FechaTile extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  SectionHeader  (igual al original, color rojo→verde)
-// ═══════════════════════════════════════════════════════════════
 class SectionHeader extends StatelessWidget {
   final IconData icon;
   final String   label;

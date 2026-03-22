@@ -43,7 +43,7 @@ class HoverIconButton extends StatefulWidget {
   /// Padding interno del botón.
   final double padding;
 
-  const HoverIconButton({
+const HoverIconButton({
     super.key,
     required this.icon,
     required this.color,
@@ -53,6 +53,7 @@ class HoverIconButton extends StatefulWidget {
     this.borderColor,
     this.iconSize = 20,
     this.padding = 10,
+    this.tooltip,
   });
 
   @override
@@ -72,7 +73,7 @@ class _HoverIconButtonState extends State<HoverIconButton> {
         ? widget.color
         : (widget.borderColor ?? Colors.transparent);
 
-    return MouseRegion(
+    Widget child = MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit:  (_) => setState(() => _hovered = false),
       child: GestureDetector(
@@ -89,5 +90,14 @@ class _HoverIconButtonState extends State<HoverIconButton> {
         ),
       ),
     );
+
+    if (widget.tooltip != null) {
+      child = Tooltip(
+        message: widget.tooltip!,
+        child: child,
+      );
+    }
+
+    return child;
   }
-}
+}
